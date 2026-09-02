@@ -62,6 +62,57 @@ fn build_rows() -> Result<Vec<Row>> {
     Ok(rows)
 }
 
+/// Case-insensitive subsequence match, fzf-style but without the ranking.
+fn fuzzy_match(text: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let text_lower = text.to_lowercase();
+    let mut chars = text_lower.chars();
+    'query: for qc in query.to_lowercase().chars() {
+        for tc in chars.by_ref() {
+            if tc == qc {
+                continue 'query;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// Indices into `rows` to display for the given query: every matching entry,
+/// plus the section header above it (once) for context. An empty query
+/// shows everything, blanks included.
+fn filtered_indices(rows: &[Row], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..rows.len()).collect();
+    }
+    let mut result = Vec::new();
+    let mut pending_section: Option<usize> = None;
+    let mut section_included = false;
+    for (i, row) in rows.iter().enumerate() {
+        match row {
+            Row::Section(_) => {
+                pending_section = Some(i);
+                section_included = false;
+            }
+            Row::Blank => {}
+            Row::Entry(key, desc) => {
+                if fuzzy_match(key, query) || fuzzy_match(desc, query) {
+                    if !section_included {
+                        if let Some(si) = pending_section {
+                            result.push(si);
+                        }
+                        section_included = true;
+                    }
+                    result.push(i);
+                }
+            }
+        }
+    }
+    result
+}
+
 fn render_row(row: &Row, width: usize) -> String {
     match row {
         Row::Blank => String::new(),
@@ -87,13 +138,16 @@ fn render_row(row: &Row, width: usize) -> String {
 fn render(
     out: &mut impl Write,
     rows: &[Row],
+    filtered: &[usize],
     active_profile: &str,
     offset: &mut usize,
+    query: &str,
+    searching: bool,
 ) -> Result<()> {
     let (cols, term_rows) = terminal::size()?;
     let cols = cols as usize;
     let viewport = (term_rows as usize).saturating_sub(4).max(1);
-    let max_offset = rows.len().saturating_sub(viewport);
+    let max_offset = filtered.len().saturating_sub(viewport);
     *offset = (*offset).min(max_offset);
 
     let banner = format!(" active profile: {active_profile} ");
@@ -103,16 +157,24 @@ fn render(
     buf.push_str("\x1b[2J\x1b[H");
     buf.push_str(&" ".repeat(pad));
     buf.push_str(&format!("{BOLD}{BG_CYAN}{FG_BLACK}{banner}{RESET}\x1b[K\r\n\r\n"));
-    for row in rows.iter().skip(*offset).take(viewport) {
-        buf.push_str(&render_row(row, cols));
+    if filtered.is_empty() {
+        buf.push_str(&format!("{LEFT_PAD}{DIM}no matches{RESET}\x1b[K\r\n"));
+    }
+    for &idx in filtered.iter().skip(*offset).take(viewport) {
+        buf.push_str(&render_row(&rows[idx], cols));
         buf.push_str("\x1b[K\r\n");
     }
     buf.push_str("\x1b[K\r\n");
-    buf.push_str(&format!(
-        "{LEFT_PAD}{DIM}scroll{RESET} {BOLD}j/k/wheel/\u{2191}/\u{2193}{RESET}\
-         {DIM}  \u{b7}  switch profile{RESET} {BOLD}shift+k{RESET}\
-         {DIM}  \u{b7}  close{RESET} {BOLD}esc/q{RESET}\x1b[K"
-    ));
+    if searching {
+        buf.push_str(&format!("{LEFT_PAD}{BOLD}/{RESET}{query}\u{2588}\x1b[K"));
+    } else {
+        buf.push_str(&format!(
+            "{LEFT_PAD}{DIM}scroll{RESET} {BOLD}j/k/wheel/\u{2191}/\u{2193}{RESET}\
+             {DIM}  \u{b7}  search{RESET} {BOLD}/{RESET}\
+             {DIM}  \u{b7}  switch profile{RESET} {BOLD}shift+k{RESET}\
+             {DIM}  \u{b7}  close{RESET} {BOLD}esc/q{RESET}\x1b[K"
+        ));
+    }
     out.write_all(buf.as_bytes())?;
     out.flush()?;
     Ok(())
@@ -134,8 +196,19 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
     let mut rows = build_rows()?;
     let mut active_profile = config::read_active_profile().unwrap_or_else(|| "?".to_string());
     let mut offset: usize = 0;
+    let mut query = String::new();
+    let mut searching = false;
+    let mut filtered = filtered_indices(&rows, &query);
 
-    render(out, &rows, &active_profile, &mut offset)?;
+    render(
+        out,
+        &rows,
+        &filtered,
+        &active_profile,
+        &mut offset,
+        &query,
+        searching,
+    )?;
 
     loop {
         // Block for the next event, then drain any already-queued ones (a
@@ -154,22 +227,49 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                     MouseEventKind::ScrollDown => offset += 3,
                     _ => {}
                 },
-                Event::Key(k) if k.kind == KeyEventKind::Press => match k.code {
-                    KeyCode::Esc | KeyCode::Char('q') => quit = true,
-                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        quit = true
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => offset += 1,
-                    KeyCode::Char('k') | KeyCode::Up => offset = offset.saturating_sub(1),
-                    KeyCode::Char('K') => {
-                        if switch::switch_to_next().is_ok() {
-                            rows = build_rows()?;
-                            active_profile =
-                                config::read_active_profile().unwrap_or_else(|| "?".to_string());
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        quit = true;
+                    } else if searching {
+                        match k.code {
+                            KeyCode::Esc => {
+                                searching = false;
+                                query.clear();
+                                filtered = filtered_indices(&rows, &query);
+                                offset = 0;
+                            }
+                            KeyCode::Enter => searching = false,
+                            KeyCode::Backspace => {
+                                query.pop();
+                                filtered = filtered_indices(&rows, &query);
+                                offset = 0;
+                            }
+                            KeyCode::Char(c) => {
+                                query.push(c);
+                                filtered = filtered_indices(&rows, &query);
+                                offset = 0;
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match k.code {
+                            KeyCode::Esc | KeyCode::Char('q') => quit = true,
+                            KeyCode::Char('/') => searching = true,
+                            KeyCode::Char('j') | KeyCode::Down => offset += 1,
+                            KeyCode::Char('k') | KeyCode::Up => offset = offset.saturating_sub(1),
+                            KeyCode::Char('K') => {
+                                if switch::switch_to_next().is_ok() {
+                                    rows = build_rows()?;
+                                    active_profile = config::read_active_profile()
+                                        .unwrap_or_else(|| "?".to_string());
+                                    filtered = filtered_indices(&rows, &query);
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -177,7 +277,15 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
         if quit {
             break;
         }
-        render(out, &rows, &active_profile, &mut offset)?;
+        render(
+            out,
+            &rows,
+            &filtered,
+            &active_profile,
+            &mut offset,
+            &query,
+            searching,
+        )?;
     }
     Ok(())
 }

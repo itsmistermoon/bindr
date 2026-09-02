@@ -13,7 +13,8 @@ touching anything else (theme, UI settings, other plugins' keybinds, etc.).
   every profile, with the active one marked.
 - **Keybinds viewer** — a read-only replica of Herdr's built-in `prefix+?`
   panel, scrollable, that also lets you switch profiles in place with
-  `shift+k` without losing your scroll position.
+  `shift+k` without losing your scroll position, and fuzzy-search entries
+  with `/`.
 - **Save profile** — snapshot your current `[keys]` table as a new named
   profile.
 
@@ -53,3 +54,15 @@ other plugins) and every other section untouched.
 Built with [`toml_edit`](https://docs.rs/toml_edit) for format-preserving
 edits and [`crossterm`](https://docs.rs/crossterm) for the interactive
 popups.
+
+## See also
+
+If you use [Ghostty](https://ghostty.org) as your terminal, you can unbind
+its own tab/pane/split shortcuts so they pass through to Herdr instead,
+avoiding duplicate or conflicting keys:
+
+- [Making Ghostty and Herdr share one keyboard](https://dev.to/oronbz/making-ghostty-and-herdr-share-one-keyboard-4p0g)
+- [Ghostty + Herdr keybindings](https://deepakness.com/raw/ghostty-herdr-keybindings/)
+
+For fuzzy-searching keybinds from outside Herdr's own panels, see
+[herdr-keybind-search](https://github.com/malone-c/herdr-keybind-search).
