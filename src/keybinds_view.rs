@@ -20,6 +20,7 @@ const BG_CYAN: &str = "\x1b[46m";
 const FG_BLACK: &str = "\x1b[30m";
 const KEY_COL: usize = 30;
 const LEFT_PAD: &str = "  ";
+const PAGE_STEP: usize = 10;
 
 enum Row {
     Section(String),
@@ -119,6 +120,55 @@ fn filtered_indices(rows: &[Row], query: &str) -> Vec<usize> {
     result
 }
 
+/// (label, keys) pairs for the footer hint, in display order. Kept whole --
+/// never broken across a line -- by `wrap_footer`.
+fn footer_segments(searching: bool) -> Vec<(&'static str, &'static str)> {
+    if searching {
+        vec![
+            ("filter", "type/backspace"),
+            ("clear", "ctrl+u"),
+            ("scroll", "\u{2191}\u{2193}/pgup/pgdn"),
+            ("back", "esc"),
+        ]
+    } else {
+        vec![
+            ("search", "/"),
+            ("scroll", "j/k/\u{2191}\u{2193}/pgup/pgdn"),
+            ("switch profile", "shift+k"),
+            ("close", "esc/enter/q"),
+        ]
+    }
+}
+
+const FOOTER_SEP: &str = " \u{b7} ";
+
+/// Greedily packs footer segments onto lines, each no wider than `cols`
+/// (accounting for `LEFT_PAD`), without ever splitting a single segment.
+fn wrap_footer(segments: &[(&str, &str)], cols: usize) -> Vec<String> {
+    let budget = cols.saturating_sub(LEFT_PAD.chars().count());
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut line_width = 0;
+    for (label, key) in segments {
+        let seg_width = label.chars().count() + 1 + key.chars().count();
+        let extra = if line.is_empty() { 0 } else { FOOTER_SEP.chars().count() };
+        if !line.is_empty() && line_width + extra + seg_width > budget {
+            lines.push(std::mem::take(&mut line));
+            line_width = 0;
+        }
+        if !line.is_empty() {
+            line.push_str(&format!("{DIM}{FOOTER_SEP}{RESET}"));
+            line_width += FOOTER_SEP.chars().count();
+        }
+        line.push_str(&format!("{DIM}{label}{RESET} {key}"));
+        line_width += seg_width;
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 fn render_row(row: &Row, width: usize) -> String {
     match row {
         Row::Blank => String::new(),
@@ -188,7 +238,13 @@ impl ViewState {
 fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     let (cols, term_rows) = terminal::size()?;
     let cols = cols as usize;
-    let viewport = (term_rows as usize).saturating_sub(4).max(1);
+
+    let footer_lines = wrap_footer(&footer_segments(state.searching), cols);
+    // Fixed chrome: banner + blank, search/hint line + blank, trailing blank,
+    // then the footer (which may itself wrap onto more than one line).
+    let viewport = (term_rows as usize)
+        .saturating_sub(5 + footer_lines.len())
+        .max(1);
     let max_offset = state.filtered.len().saturating_sub(viewport);
     state.offset = state.offset.min(max_offset);
 
@@ -217,21 +273,14 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
         buf.push_str("\x1b[K\r\n");
     }
     buf.push_str("\x1b[K\r\n");
-    if state.searching {
-        buf.push_str(&format!(
-            "{LEFT_PAD}{DIM}filter{RESET} {BOLD}type/backspace{RESET}\
-             {DIM}  \u{b7}  clear{RESET} {BOLD}ctrl+u{RESET}\
-             {DIM}  \u{b7}  scroll{RESET} {BOLD}\u{2191}/\u{2193}{RESET}\
-             {DIM}  \u{b7}  back{RESET} {BOLD}esc{RESET}\x1b[K"
-        ));
-    } else {
-        buf.push_str(&format!(
-            "{LEFT_PAD}{DIM}scroll{RESET} {BOLD}j/k/wheel/\u{2191}/\u{2193}{RESET}\
-             {DIM}  \u{b7}  search{RESET} {BOLD}/{RESET}\
-             {DIM}  \u{b7}  switch profile{RESET} {BOLD}shift+k{RESET}\
-             {DIM}  \u{b7}  close{RESET} {BOLD}esc/q{RESET}\x1b[K"
-        ));
+    for (i, line) in footer_lines.iter().enumerate() {
+        if i > 0 {
+            buf.push_str("\x1b[K\r\n");
+        }
+        buf.push_str(LEFT_PAD);
+        buf.push_str(line);
     }
+    buf.push_str("\x1b[K");
     out.write_all(buf.as_bytes())?;
     out.flush()?;
     Ok(())
@@ -288,6 +337,10 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                             // j/k) stay reserved for the query text.
                             KeyCode::Down => state.offset += 1,
                             KeyCode::Up => state.offset = state.offset.saturating_sub(1),
+                            KeyCode::PageDown => state.offset += PAGE_STEP,
+                            KeyCode::PageUp => {
+                                state.offset = state.offset.saturating_sub(PAGE_STEP)
+                            }
                             KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                                 state.query.clear();
                                 state.refilter();
@@ -304,11 +357,15 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                         }
                     } else {
                         match k.code {
-                            KeyCode::Esc | KeyCode::Char('q') => quit = true,
+                            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => quit = true,
                             KeyCode::Char('/') => state.searching = true,
                             KeyCode::Char('j') | KeyCode::Down => state.offset += 1,
                             KeyCode::Char('k') | KeyCode::Up => {
                                 state.offset = state.offset.saturating_sub(1)
+                            }
+                            KeyCode::PageDown => state.offset += PAGE_STEP,
+                            KeyCode::PageUp => {
+                                state.offset = state.offset.saturating_sub(PAGE_STEP)
                             }
                             KeyCode::Char('K') => state.switch_profile()?,
                             _ => {}
