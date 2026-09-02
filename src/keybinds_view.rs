@@ -199,6 +199,16 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     buf.push_str("\x1b[2J\x1b[H");
     buf.push_str(&" ".repeat(pad));
     buf.push_str(&format!("{BOLD}{BG_CYAN}{FG_BLACK}{banner}{RESET}\x1b[K\r\n\r\n"));
+    if state.searching {
+        buf.push_str(&format!(
+            "{LEFT_PAD}{BOLD}/{RESET}{}\u{2588}\x1b[K\r\n\r\n",
+            state.query
+        ));
+    } else {
+        buf.push_str(&format!(
+            "{LEFT_PAD}{DIM}press / to filter by command or shortcut{RESET}\x1b[K\r\n\r\n"
+        ));
+    }
     if state.filtered.is_empty() {
         buf.push_str(&format!("{LEFT_PAD}{DIM}no matches{RESET}\x1b[K\r\n"));
     }
@@ -209,8 +219,10 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     buf.push_str("\x1b[K\r\n");
     if state.searching {
         buf.push_str(&format!(
-            "{LEFT_PAD}{BOLD}/{RESET}{}\u{2588}\x1b[K",
-            state.query
+            "{LEFT_PAD}{DIM}filter{RESET} {BOLD}type/backspace{RESET}\
+             {DIM}  \u{b7}  clear{RESET} {BOLD}ctrl+u{RESET}\
+             {DIM}  \u{b7}  scroll{RESET} {BOLD}\u{2191}/\u{2193}{RESET}\
+             {DIM}  \u{b7}  back{RESET} {BOLD}esc{RESET}\x1b[K"
         ));
     } else {
         buf.push_str(&format!(
@@ -276,6 +288,10 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                             // j/k) stay reserved for the query text.
                             KeyCode::Down => state.offset += 1,
                             KeyCode::Up => state.offset = state.offset.saturating_sub(1),
+                            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                                state.query.clear();
+                                state.refilter();
+                            }
                             KeyCode::Backspace => {
                                 state.query.pop();
                                 state.refilter();
