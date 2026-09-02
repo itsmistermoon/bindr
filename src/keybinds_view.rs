@@ -81,26 +81,32 @@ fn fuzzy_match(text: &str, query: &str) -> bool {
 }
 
 /// Indices into `rows` to display for the given query: every matching entry,
-/// plus the section header above it (once) for context. An empty query
-/// shows everything, blanks included.
+/// plus the section header above it (once) for context. A section whose own
+/// name matches shows all of its entries. An empty query shows everything,
+/// blanks included.
 fn filtered_indices(rows: &[Row], query: &str) -> Vec<usize> {
     if query.is_empty() {
         return (0..rows.len()).collect();
     }
     let mut result = Vec::new();
-    let mut pending_section: Option<usize> = None;
+    let mut section_start: Option<usize> = None;
+    let mut section_matches = false;
     let mut section_included = false;
     for (i, row) in rows.iter().enumerate() {
         match row {
-            Row::Section(_) => {
-                pending_section = Some(i);
-                section_included = false;
+            Row::Section(name) => {
+                section_start = Some(i);
+                section_matches = fuzzy_match(name, query);
+                section_included = section_matches;
+                if section_matches {
+                    result.push(i);
+                }
             }
             Row::Blank => {}
             Row::Entry(key, desc) => {
-                if fuzzy_match(key, query) || fuzzy_match(desc, query) {
+                if section_matches || fuzzy_match(key, query) || fuzzy_match(desc, query) {
                     if !section_included {
-                        if let Some(si) = pending_section {
+                        if let Some(si) = section_start {
                             result.push(si);
                         }
                         section_included = true;
@@ -121,11 +127,10 @@ fn render_row(row: &Row, width: usize) -> String {
             let desc_width = (width.saturating_sub(LEFT_PAD.len() + KEY_COL)).max(4);
             let desc = if desc.chars().count() > desc_width {
                 let mut cut: String = desc.chars().take(desc_width.saturating_sub(1)).collect();
-                if let Some(space_idx) = cut.rfind(' ') {
-                    if space_idx as f64 > desc_width as f64 * 0.6 {
+                if let Some(space_idx) = cut.rfind(' ')
+                    && space_idx as f64 > desc_width as f64 * 0.6 {
                         cut.truncate(space_idx);
                     }
-                }
                 format!("{}…", cut.trim_end())
             } else {
                 desc.clone()
@@ -135,38 +140,78 @@ fn render_row(row: &Row, width: usize) -> String {
     }
 }
 
-fn render(
-    out: &mut impl Write,
-    rows: &[Row],
-    filtered: &[usize],
-    active_profile: &str,
-    offset: &mut usize,
-    query: &str,
+/// Everything the popup needs to redraw itself: the full row list, the
+/// current search's visible subset of it, and cursor/mode state. Bundled so
+/// `render` takes one argument instead of a growing parameter list.
+struct ViewState {
+    rows: Vec<Row>,
+    filtered: Vec<usize>,
+    active_profile: String,
+    offset: usize,
+    query: String,
     searching: bool,
-) -> Result<()> {
+}
+
+impl ViewState {
+    fn load() -> Result<Self> {
+        let rows = build_rows()?;
+        let query = String::new();
+        let filtered = filtered_indices(&rows, &query);
+        Ok(Self {
+            rows,
+            filtered,
+            active_profile: config::read_active_profile().unwrap_or_else(|| "?".to_string()),
+            offset: 0,
+            query,
+            searching: false,
+        })
+    }
+
+    /// Recompute `filtered` from the current query and jump back to the top.
+    /// `filtered` and `offset` always change together, so this is the only
+    /// place either is touched outside scrolling.
+    fn refilter(&mut self) {
+        self.filtered = filtered_indices(&self.rows, &self.query);
+        self.offset = 0;
+    }
+
+    fn switch_profile(&mut self) -> Result<()> {
+        if switch::switch_to_next().is_ok() {
+            self.rows = build_rows()?;
+            self.active_profile = config::read_active_profile().unwrap_or_else(|| "?".to_string());
+            self.filtered = filtered_indices(&self.rows, &self.query);
+        }
+        Ok(())
+    }
+}
+
+fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     let (cols, term_rows) = terminal::size()?;
     let cols = cols as usize;
     let viewport = (term_rows as usize).saturating_sub(4).max(1);
-    let max_offset = filtered.len().saturating_sub(viewport);
-    *offset = (*offset).min(max_offset);
+    let max_offset = state.filtered.len().saturating_sub(viewport);
+    state.offset = state.offset.min(max_offset);
 
-    let banner = format!(" active profile: {active_profile} ");
+    let banner = format!(" active profile: {} ", state.active_profile);
     let pad = cols.saturating_sub(banner.chars().count()) / 2;
 
     let mut buf = String::new();
     buf.push_str("\x1b[2J\x1b[H");
     buf.push_str(&" ".repeat(pad));
     buf.push_str(&format!("{BOLD}{BG_CYAN}{FG_BLACK}{banner}{RESET}\x1b[K\r\n\r\n"));
-    if filtered.is_empty() {
+    if state.filtered.is_empty() {
         buf.push_str(&format!("{LEFT_PAD}{DIM}no matches{RESET}\x1b[K\r\n"));
     }
-    for &idx in filtered.iter().skip(*offset).take(viewport) {
-        buf.push_str(&render_row(&rows[idx], cols));
+    for &idx in state.filtered.iter().skip(state.offset).take(viewport) {
+        buf.push_str(&render_row(&state.rows[idx], cols));
         buf.push_str("\x1b[K\r\n");
     }
     buf.push_str("\x1b[K\r\n");
-    if searching {
-        buf.push_str(&format!("{LEFT_PAD}{BOLD}/{RESET}{query}\u{2588}\x1b[K"));
+    if state.searching {
+        buf.push_str(&format!(
+            "{LEFT_PAD}{BOLD}/{RESET}{}\u{2588}\x1b[K",
+            state.query
+        ));
     } else {
         buf.push_str(&format!(
             "{LEFT_PAD}{DIM}scroll{RESET} {BOLD}j/k/wheel/\u{2191}/\u{2193}{RESET}\
@@ -193,24 +238,11 @@ pub fn run() -> Result<()> {
 }
 
 fn main_loop(out: &mut impl Write) -> Result<()> {
-    let mut rows = build_rows()?;
-    let mut active_profile = config::read_active_profile().unwrap_or_else(|| "?".to_string());
-    let mut offset: usize = 0;
-    let mut query = String::new();
-    let mut searching = false;
-    let mut filtered = filtered_indices(&rows, &query);
-
-    render(
-        out,
-        &rows,
-        &filtered,
-        &active_profile,
-        &mut offset,
-        &query,
-        searching,
-    )?;
+    let mut state = ViewState::load()?;
 
     loop {
+        render(out, &mut state)?;
+
         // Block for the next event, then drain any already-queued ones (a
         // fast scroll burst) before redrawing once, instead of redrawing
         // per event.
@@ -223,49 +255,46 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
         for ev in events {
             match ev {
                 Event::Mouse(m) => match m.kind {
-                    MouseEventKind::ScrollUp => offset = offset.saturating_sub(3),
-                    MouseEventKind::ScrollDown => offset += 3,
+                    MouseEventKind::ScrollUp => state.offset = state.offset.saturating_sub(3),
+                    MouseEventKind::ScrollDown => state.offset += 3,
                     _ => {}
                 },
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         quit = true;
-                    } else if searching {
+                    } else if state.searching {
                         match k.code {
                             KeyCode::Esc => {
-                                searching = false;
-                                query.clear();
-                                filtered = filtered_indices(&rows, &query);
-                                offset = 0;
+                                state.searching = false;
+                                state.query.clear();
+                                state.refilter();
                             }
-                            KeyCode::Enter => searching = false,
+                            KeyCode::Enter => state.searching = false,
+                            // Arrow keys navigate the live-filtered results
+                            // without leaving search mode; letters (including
+                            // j/k) stay reserved for the query text.
+                            KeyCode::Down => state.offset += 1,
+                            KeyCode::Up => state.offset = state.offset.saturating_sub(1),
                             KeyCode::Backspace => {
-                                query.pop();
-                                filtered = filtered_indices(&rows, &query);
-                                offset = 0;
+                                state.query.pop();
+                                state.refilter();
                             }
                             KeyCode::Char(c) => {
-                                query.push(c);
-                                filtered = filtered_indices(&rows, &query);
-                                offset = 0;
+                                state.query.push(c);
+                                state.refilter();
                             }
                             _ => {}
                         }
                     } else {
                         match k.code {
                             KeyCode::Esc | KeyCode::Char('q') => quit = true,
-                            KeyCode::Char('/') => searching = true,
-                            KeyCode::Char('j') | KeyCode::Down => offset += 1,
-                            KeyCode::Char('k') | KeyCode::Up => offset = offset.saturating_sub(1),
-                            KeyCode::Char('K') => {
-                                if switch::switch_to_next().is_ok() {
-                                    rows = build_rows()?;
-                                    active_profile = config::read_active_profile()
-                                        .unwrap_or_else(|| "?".to_string());
-                                    filtered = filtered_indices(&rows, &query);
-                                }
+                            KeyCode::Char('/') => state.searching = true,
+                            KeyCode::Char('j') | KeyCode::Down => state.offset += 1,
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                state.offset = state.offset.saturating_sub(1)
                             }
+                            KeyCode::Char('K') => state.switch_profile()?,
                             _ => {}
                         }
                     }
@@ -277,15 +306,6 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
         if quit {
             break;
         }
-        render(
-            out,
-            &rows,
-            &filtered,
-            &active_profile,
-            &mut offset,
-            &query,
-            searching,
-        )?;
     }
     Ok(())
 }
