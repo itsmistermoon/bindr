@@ -18,6 +18,7 @@ const CYAN: &str = "\x1b[36m";
 const DIM: &str = "\x1b[2m";
 const BG_CYAN: &str = "\x1b[46m";
 const FG_BLACK: &str = "\x1b[30m";
+const FG_WHITE: &str = "\x1b[97m";
 const KEY_COL: usize = 30;
 const LEFT_PAD: &str = "  ";
 const PAGE_STEP: usize = 10;
@@ -120,22 +121,27 @@ fn filtered_indices(rows: &[Row], query: &str) -> Vec<usize> {
     result
 }
 
-/// (label, keys) pairs for the footer hint, in display order. Kept whole --
-/// never broken across a line -- by `wrap_footer`.
-fn footer_segments(searching: bool) -> Vec<(&'static str, &'static str)> {
+/// One "label key" pair in the footer hint, e.g. label "close", key
+/// "esc/enter/q". Kept whole -- never broken across a line -- by `wrap_footer`.
+struct FooterHint {
+    label: &'static str,
+    key: &'static str,
+}
+
+fn footer_segments(searching: bool) -> Vec<FooterHint> {
     if searching {
         vec![
-            ("filter", "type/backspace"),
-            ("clear", "ctrl+u"),
-            ("scroll", "\u{2191}\u{2193}/pgup/pgdn"),
-            ("back", "esc"),
+            FooterHint { label: "filter", key: "type/backspace" },
+            FooterHint { label: "clear", key: "ctrl+u" },
+            FooterHint { label: "scroll", key: "\u{2191}\u{2193}/pgup/pgdn" },
+            FooterHint { label: "back", key: "esc" },
         ]
     } else {
         vec![
-            ("search", "/"),
-            ("scroll", "j/k/\u{2191}\u{2193}/pgup/pgdn"),
-            ("switch profile", "shift+k"),
-            ("close", "esc/enter/q"),
+            FooterHint { label: "search", key: "/" },
+            FooterHint { label: "scroll", key: "j/k/\u{2191}\u{2193}/pgup/pgdn" },
+            FooterHint { label: "switch profile", key: "shift+k" },
+            FooterHint { label: "close", key: "esc/enter/q" },
         ]
     }
 }
@@ -144,13 +150,13 @@ const FOOTER_SEP: &str = " \u{b7} ";
 
 /// Greedily packs footer segments onto lines, each no wider than `cols`
 /// (accounting for `LEFT_PAD`), without ever splitting a single segment.
-fn wrap_footer(segments: &[(&str, &str)], cols: usize) -> Vec<String> {
+fn wrap_footer(segments: &[FooterHint], cols: usize) -> Vec<String> {
     let budget = cols.saturating_sub(LEFT_PAD.chars().count());
     let mut lines = Vec::new();
     let mut line = String::new();
     let mut line_width = 0;
-    for (label, key) in segments {
-        let seg_width = label.chars().count() + 1 + key.chars().count();
+    for hint in segments {
+        let seg_width = hint.label.chars().count() + 1 + hint.key.chars().count();
         let extra = if line.is_empty() { 0 } else { FOOTER_SEP.chars().count() };
         if !line.is_empty() && line_width + extra + seg_width > budget {
             lines.push(std::mem::take(&mut line));
@@ -160,7 +166,10 @@ fn wrap_footer(segments: &[(&str, &str)], cols: usize) -> Vec<String> {
             line.push_str(&format!("{DIM}{FOOTER_SEP}{RESET}"));
             line_width += FOOTER_SEP.chars().count();
         }
-        line.push_str(&format!("{DIM}{label}{RESET} {key}"));
+        line.push_str(&format!(
+            "{DIM}{}{RESET} {FG_WHITE}{}{RESET}",
+            hint.label, hint.key
+        ));
         line_width += seg_width;
     }
     if !line.is_empty() {
@@ -223,6 +232,15 @@ impl ViewState {
     fn refilter(&mut self) {
         self.filtered = filtered_indices(&self.rows, &self.query);
         self.offset = 0;
+    }
+
+    /// Move the scroll offset by `delta` rows, clamping at zero.
+    fn scroll(&mut self, delta: isize) {
+        self.offset = if delta < 0 {
+            self.offset.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.offset + delta as usize
+        };
     }
 
     fn switch_profile(&mut self) -> Result<()> {
@@ -316,8 +334,8 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
         for ev in events {
             match ev {
                 Event::Mouse(m) => match m.kind {
-                    MouseEventKind::ScrollUp => state.offset = state.offset.saturating_sub(3),
-                    MouseEventKind::ScrollDown => state.offset += 3,
+                    MouseEventKind::ScrollUp => state.scroll(-3),
+                    MouseEventKind::ScrollDown => state.scroll(3),
                     _ => {}
                 },
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
@@ -335,12 +353,10 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                             // Arrow keys navigate the live-filtered results
                             // without leaving search mode; letters (including
                             // j/k) stay reserved for the query text.
-                            KeyCode::Down => state.offset += 1,
-                            KeyCode::Up => state.offset = state.offset.saturating_sub(1),
-                            KeyCode::PageDown => state.offset += PAGE_STEP,
-                            KeyCode::PageUp => {
-                                state.offset = state.offset.saturating_sub(PAGE_STEP)
-                            }
+                            KeyCode::Down => state.scroll(1),
+                            KeyCode::Up => state.scroll(-1),
+                            KeyCode::PageDown => state.scroll(PAGE_STEP as isize),
+                            KeyCode::PageUp => state.scroll(-(PAGE_STEP as isize)),
                             KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                                 state.query.clear();
                                 state.refilter();
@@ -359,14 +375,10 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                         match k.code {
                             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => quit = true,
                             KeyCode::Char('/') => state.searching = true,
-                            KeyCode::Char('j') | KeyCode::Down => state.offset += 1,
-                            KeyCode::Char('k') | KeyCode::Up => {
-                                state.offset = state.offset.saturating_sub(1)
-                            }
-                            KeyCode::PageDown => state.offset += PAGE_STEP,
-                            KeyCode::PageUp => {
-                                state.offset = state.offset.saturating_sub(PAGE_STEP)
-                            }
+                            KeyCode::Char('j') | KeyCode::Down => state.scroll(1),
+                            KeyCode::Char('k') | KeyCode::Up => state.scroll(-1),
+                            KeyCode::PageDown => state.scroll(PAGE_STEP as isize),
+                            KeyCode::PageUp => state.scroll(-(PAGE_STEP as isize)),
                             KeyCode::Char('K') => state.switch_profile()?,
                             _ => {}
                         }
