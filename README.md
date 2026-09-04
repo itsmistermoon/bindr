@@ -22,6 +22,37 @@ touching anything else (theme, UI settings, other plugins' keybinds, etc.).
 - **Save profile** — snapshot your current `[keys]` table as a new named
   profile.
 
+## Current status
+
+`bindr` is functional but still in active development. The marketplace listing
+is intentionally public while the profile editor is being completed.
+
+Currently available:
+
+- Profile switching with an optional confirmation toast.
+- A keybind viewer with clickable profile tabs and preserved scroll position.
+- In-popup editing of scalar keybinds, including each profile's own `prefix`.
+- Safe capture confirmation: `enter` saves, `backspace` retries, `esc` cancels,
+  and `u` undoes the last saved edit.
+- Editing the active profile updates Herdr immediately; editing another profile
+  only changes its TOML file.
+
+Known limitations:
+
+- Profile creation still requires `save-as.sh`.
+- Undo currently has one level.
+- Some shortcuts can be intercepted by the terminal, SSH/tmux, Herdr, or the
+  operating system.
+- Custom `[[keys.command]]` bindings remain read-only and outside profiles by
+  design.
+
+## Roadmap
+
+1. Create profiles from inside the keybinds popup.
+2. Add explicit/manual shortcut entry and collision warnings.
+3. Improve undo and profile management (multiple undo levels, rename/delete).
+4. Expand interactive testing across local, SSH, and tmux environments.
+
 ## Install
 
 ```sh
@@ -39,7 +70,11 @@ Default keybinds (see `herdr-plugin.toml` for the action IDs):
 | Key | Action |
 | --- | --- |
 | `prefix+shift+k` | Switch to the next profile |
-| `prefix+shift+e` | View all keybinds and profiles |
+| `prefix+shift+e` | View and edit keybind profiles |
+
+Inside the keybinds popup, use `←/→` or click to browse profiles without
+activating them. Press `e` to edit the viewed profile; `Enter` selects a row
+and enters key listening mode. `u` undoes the last saved edit.
 
 Profiles live under `HERDR_PLUGIN_CONFIG_DIR/profiles/<name>.toml`. To save
 the currently active keybindings as a new profile:
