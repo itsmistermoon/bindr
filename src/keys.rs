@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
-use toml_edit::{DocumentMut, Item, Table};
+use toml_edit::{DocumentMut, Item, Table, value};
 
 pub fn load(path: &Path) -> Result<DocumentMut> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
@@ -27,6 +27,31 @@ fn keys_table_mut(doc: &mut DocumentMut) -> &mut Table {
         doc["keys"] = Item::Table(Table::new());
     }
     doc["keys"].as_table_mut().expect("keys must be a table")
+}
+
+/// Return a cloned `[keys]` item, preserving its original TOML type for undo.
+pub fn get_item(doc: &DocumentMut, key: &str) -> Option<Item> {
+    doc.get("keys")
+        .and_then(Item::as_table)
+        .and_then(|table| table.get(key))
+        .cloned()
+}
+
+/// Set one item in `[keys]`, preserving the rest of the document.
+pub fn set_item(doc: &mut DocumentMut, key: &str, item: Item) {
+    keys_table_mut(doc).insert(key, item);
+}
+
+/// Set one scalar binding in `[keys]`, preserving the rest of the document.
+pub fn set_scalar(doc: &mut DocumentMut, key: &str, binding: &str) {
+    set_item(doc, key, value(binding));
+}
+
+/// Remove one scalar binding from `[keys]`, preserving the rest of the table.
+pub fn remove_scalar(doc: &mut DocumentMut, key: &str) {
+    if let Some(table) = doc.get_mut("keys").and_then(Item::as_table_mut) {
+        table.remove(key);
+    }
 }
 
 /// Replace every non-"command" entry in the live `[keys]` table with the
@@ -112,4 +137,3 @@ pub fn custom_commands(doc: &DocumentMut) -> Vec<(String, String)> {
         })
         .unwrap_or_default()
 }
-

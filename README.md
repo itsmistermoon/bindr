@@ -11,10 +11,14 @@ touching anything else (theme, UI settings, other plugins' keybinds, etc.).
   to a specific one via `save-as.sh`.
 - **Toast popup** — a self-closing popup confirming the switch and listing
   every profile, with the active one marked.
-- **Keybinds viewer** — a read-only replica of Herdr's built-in `prefix+?`
-  panel, scrollable, that also lets you switch profiles in place with
-  `shift+k` without losing your scroll position, and fuzzy-search entries
-  with `/`.
+- **Keybinds viewer/editor** — a replica of Herdr's built-in `prefix+?`
+  panel, scrollable, with one clickable tab per profile. Browse a profile
+  without activating it, preserve the scroll position while comparing tabs,
+  edit bindings with `e` (including each profile's own prefix), switch the
+  active profile in place with `shift+k` without changing the viewed tab, and
+  fuzzy-search entries with `/`. Captures require `enter` to save;
+  `backspace` retries and `u` undoes the last saved edit. Editing a prefix
+  saves it before any other binding can be edited.
 - **Save profile** — snapshot your current `[keys]` table as a new named
   profile.
 
@@ -35,7 +39,7 @@ Default keybinds (see `herdr-plugin.toml` for the action IDs):
 | Key | Action |
 | --- | --- |
 | `prefix+shift+k` | Switch to the next profile |
-| `prefix+shift+e` | View all keybinds |
+| `prefix+shift+e` | View all keybinds and profiles |
 
 Profiles live under `HERDR_PLUGIN_CONFIG_DIR/profiles/<name>.toml`. To save
 the currently active keybindings as a new profile:

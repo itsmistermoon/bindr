@@ -7,8 +7,21 @@
 //!     active one (wrapping around), like Zellij keybinding presets.
 
 use crate::{config, keys, pane};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::process::Command;
+
+pub fn reload_config() -> Result<()> {
+    let output = Command::new(config::herdr_bin())
+        .args(["server", "reload-config"])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "reload-config failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
 
 /// Apply the next (or pending-name) profile to config.toml and reload.
 /// Shared by the `switch` subcommand and the in-popup shift+K shortcut in
@@ -29,15 +42,7 @@ pub fn switch_to_next() -> Result<String> {
 
     config::write_active_profile(&target)?;
 
-    let output = Command::new(config::herdr_bin())
-        .args(["server", "reload-config"])
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "switched to profile '{target}' but reload-config failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    reload_config().map_err(|e| anyhow::anyhow!("switched to profile '{target}' but {e}"))?;
 
     Ok(target)
 }
