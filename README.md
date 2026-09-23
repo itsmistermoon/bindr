@@ -16,26 +16,35 @@ touching anything else (theme, UI settings, other plugins' keybinds, etc.).
   without activating it, preserve the scroll position while comparing tabs,
   edit bindings with `e` (including each profile's own prefix), switch the
   active profile in place with `shift+k` without changing the viewed tab, and
-  fuzzy-search entries with `/`. Captures require `enter` to save;
-  `backspace` retries and `u` undoes the last saved edit. Editing a prefix
-  saves it before any other binding can be edited.
+  fuzzy-search entries with `/`. Captures require `enter` to stage a change;
+  `backspace` retries and `u` undoes the last staged edit. Use `m` in edit mode
+  to enter a binding manually, including ranges such as `prefix+1..9`.
+  Duplicate bindings are shown in ANSI red and block leaving edit mode until
+  resolved. The `default` profile is read-only.
 - **Save profile** — snapshot your current `[keys]` table as a new named
   profile.
 
 ## Current status
 
-`bindr` is functional but still in active development. The marketplace listing
-is intentionally public while the profile editor is being completed.
+`bindr` is functional but still in active development. The profile editor is
+available for existing profiles; profile creation and management remain on the
+roadmap.
 
 Currently available:
 
 - Profile switching with an optional confirmation toast.
 - A keybind viewer with clickable profile tabs and preserved scroll position.
 - In-popup editing of scalar keybinds, including each profile's own `prefix`.
-- Safe capture confirmation: `enter` saves, `backspace` retries, `esc` cancels,
-  and `u` undoes the last saved edit.
-- Editing the active profile updates Herdr immediately; editing another profile
-  only changes its TOML file.
+- Safe capture confirmation: `enter` records a change in the editor,
+  `backspace` retries, `esc` cancels, and `u` undoes the last staged edit.
+- Profile-save confirmation: leaving edit mode asks whether to save or discard
+  the changes. Duplicate bindings are highlighted in red and prevent leaving
+  until resolved.
+- Manual binding entry for Herdr range syntax such as `prefix+1..9`.
+- The `default` profile is generated when needed, can be selected as a neutral
+  fallback, and can never be edited or overwritten.
+- Editing the active profile updates Herdr after the profile-save confirmation;
+  editing another profile only changes its TOML file after confirmation.
 
 Known limitations:
 
@@ -49,8 +58,7 @@ Known limitations:
 ## Roadmap
 
 1. Create profiles from inside the keybinds popup.
-2. Add explicit/manual shortcut entry and collision warnings.
-3. Improve undo and profile management (multiple undo levels, rename/delete).
+2. Improve profile management (multiple undo levels, rename/delete).
 4. Expand interactive testing across local, SSH, and tmux environments.
 
 ## Install
@@ -74,7 +82,13 @@ Default keybinds (see `herdr-plugin.toml` for the action IDs):
 
 Inside the keybinds popup, use `←/→` or click to browse profiles without
 activating them. Press `e` to edit the viewed profile; `Enter` selects a row
-and enters key listening mode. `u` undoes the last saved edit.
+and enters key listening mode. Press `m` in edit mode to type a binding
+manually; `Ctrl+U` clears the text, so a range can be entered as
+`prefix+1..9`. Press `esc` from the selector to review the pending profile
+changes, then `y`/`enter` to save or `n` to discard. Duplicate bindings are
+red and must be resolved before leaving edit mode. `default` is always
+read-only. `u` undoes the last staged edit while editing, or the last saved
+profile change after reopening the popup.
 
 Profiles live under `HERDR_PLUGIN_CONFIG_DIR/profiles/<name>.toml`. To save
 the currently active keybindings as a new profile:

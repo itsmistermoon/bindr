@@ -27,6 +27,7 @@ pub fn reload_config() -> Result<()> {
 /// Shared by the `switch` subcommand and the in-popup shift+K shortcut in
 /// keybinds_view; callers decide separately whether to show a toast.
 pub fn switch_to_next() -> Result<String> {
+    config::ensure_default_profile()?;
     let profiles = config::list_profiles()?;
     if profiles.is_empty() {
         bail!("no profiles found in {:?}", config::profiles_dir());

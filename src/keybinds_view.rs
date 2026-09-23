@@ -3,21 +3,28 @@
 //! switches the active profile in Herdr without changing the selected tab.
 
 use crate::{config, keybinds_data, keys, switch};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::{cursor, execute, terminal};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{Write, stdout};
 use std::time::Duration;
+use toml_edit::{DocumentMut, Item, value};
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 const CYAN: &str = "\x1b[36m";
 const DIM: &str = "\x1b[2m";
 const BG_CYAN: &str = "\x1b[46m";
+const BG_GREY: &str = "\x1b[100m";
+const BG_GREEN: &str = "\x1b[42m";
 const FG_BLACK: &str = "\x1b[30m";
+const RED: &str = "\x1b[31m";
+const BG_RED: &str = "\x1b[41m";
+const DEFAULT_PROFILE: &str = "default";
 // Use standard white plus bold instead of bright-white (97) alone. The
 // latter can collapse to the normal foreground in remote/limited-color PTYs.
 const FG_WHITE: &str = "\x1b[1;37m";
@@ -94,6 +101,37 @@ fn build_rows_for_profile(name: &str) -> Result<Vec<Row>> {
     Ok(build_rows(&profile, &live))
 }
 
+/// Return the row indices whose displayed shortcut occurs more than once.
+/// Unset bindings are intentionally ignored: several Herdr actions are
+/// unbound by default and those should not conflict with each other. Groups
+/// made only of read-only custom commands are ignored because the editor
+/// cannot resolve them.
+fn duplicate_rows(rows: &[Row]) -> HashSet<usize> {
+    let mut occurrences: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let Row::Entry { key, .. } = row else {
+            continue;
+        };
+        if key == "unset" {
+            continue;
+        }
+        occurrences
+            .entry(key.to_ascii_lowercase())
+            .or_default()
+            .push(index);
+    }
+    occurrences
+        .into_values()
+        .filter(|indices| {
+            indices.len() > 1
+                && indices
+                    .iter()
+                    .any(|&index| row_config_key(&rows[index]).is_some())
+        })
+        .flatten()
+        .collect()
+}
+
 /// Case-insensitive subsequence match, fzf-style but without the ranking.
 fn fuzzy_match(text: &str, query: &str) -> bool {
     if query.is_empty() {
@@ -164,7 +202,9 @@ fn footer_segments(
     searching: bool,
     editing: bool,
     listening: bool,
+    manual: bool,
     prefix_listening: bool,
+    confirming: bool,
 ) -> Vec<FooterHint> {
     if searching {
         vec![
@@ -179,6 +219,21 @@ fn footer_segments(
             FooterHint {
                 label: "scroll",
                 key: "\u{2191}\u{2193}/pgup/pgdn",
+            },
+            FooterHint {
+                label: "back",
+                key: "esc",
+            },
+        ]
+    } else if confirming {
+        vec![
+            FooterHint {
+                label: "save",
+                key: "y/enter",
+            },
+            FooterHint {
+                label: "discard",
+                key: "n",
             },
             FooterHint {
                 label: "back",
@@ -208,6 +263,25 @@ fn footer_segments(
                 },
             },
         ]
+    } else if manual {
+        vec![
+            FooterHint {
+                label: "type",
+                key: "text/backspace",
+            },
+            FooterHint {
+                label: "clear",
+                key: "ctrl+u",
+            },
+            FooterHint {
+                label: "save",
+                key: "enter",
+            },
+            FooterHint {
+                label: "back",
+                key: "esc",
+            },
+        ]
     } else if editing {
         vec![
             FooterHint {
@@ -217,6 +291,10 @@ fn footer_segments(
             FooterHint {
                 label: "listen",
                 key: "enter",
+            },
+            FooterHint {
+                label: "manual",
+                key: "m",
             },
             FooterHint {
                 label: "back",
@@ -416,6 +494,16 @@ fn wrap_footer(segments: &[FooterHint], cols: usize) -> Vec<String> {
 enum EditMode {
     Selecting { row: usize },
     Listening { row: usize, prefix_seen: bool },
+    Manual { row: usize },
+    Confirming { row: usize },
+}
+
+#[derive(Clone, Copy)]
+enum RowHighlight {
+    Editing,
+    Listening,
+    Saved,
+    Conflict,
 }
 
 fn row_config_key(row: &Row) -> Option<&str> {
@@ -439,7 +527,12 @@ fn key_event_binding(key: &KeyEvent) -> Option<String> {
     if key.modifiers.contains(KeyModifiers::SUPER) {
         parts.push("super".to_string());
     }
-    if key.modifiers.contains(KeyModifiers::SHIFT) {
+    // Terminal events usually encode shifted punctuation in the character
+    // itself (`?`, `!`, etc.). Herdr's syntax expects those characters as-is,
+    // while shifted letters/digits still need the explicit shift modifier.
+    let shifted_alphanumeric = key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphanumeric());
+    if shifted_alphanumeric {
         parts.push("shift".to_string());
     }
 
@@ -483,99 +576,117 @@ fn default_binding(config_key: &str) -> Option<&'static str> {
         .map(|row| row.default)
 }
 
-fn profile_binding(profile_name: &str, config_key: &str) -> Result<Option<String>> {
-    let path = config::profiles_dir().join(format!("{profile_name}.toml"));
-    let doc = keys::load(&path)?;
-    let value = keys::scalar_overrides(&doc)
-        .into_iter()
-        .find(|(key, _)| key == config_key)
-        .map(|(_, value)| value)
-        .or_else(|| default_binding(config_key).map(str::to_string));
-    Ok(value)
-}
-
 struct UndoEntry {
     profile_name: String,
-    config_key: String,
-    profile_previous: Option<toml_edit::Item>,
-    live_previous: Option<toml_edit::Item>,
+    profile_previous: DocumentMut,
+    live_previous: Option<DocumentMut>,
+    active_profile: String,
 }
 
-fn persist_binding(
+fn save_undo(undo: &UndoEntry) -> Result<()> {
+    let path = config::undo_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut doc = DocumentMut::new();
+    doc["profile"] = value(&undo.profile_name);
+    doc["active_profile"] = value(&undo.active_profile);
+    doc["profile_previous"] = value(undo.profile_previous.to_string());
+    doc["live_previous_present"] = value(undo.live_previous.is_some());
+    if let Some(item) = &undo.live_previous {
+        doc["live_previous"] = value(item.to_string());
+    }
+    fs::write(path, doc.to_string()).context("writing last keybind edit")?;
+    Ok(())
+}
+
+fn load_undo() -> Result<Option<UndoEntry>> {
+    let path = config::undo_file();
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("reading last keybind edit"),
+    };
+    let doc = text
+        .parse::<DocumentMut>()
+        .context("parsing last keybind edit")?;
+    let required = |key: &str| {
+        doc.get(key)
+            .and_then(Item::as_str)
+            .ok_or_else(|| anyhow::anyhow!("last keybind edit is missing '{key}'"))
+    };
+    let document = |key: &str| -> Result<DocumentMut> {
+        doc.get(key)
+            .and_then(Item::as_str)
+            .ok_or_else(|| anyhow::anyhow!("last keybind edit is missing '{key}'"))?
+            .parse::<DocumentMut>()
+            .with_context(|| format!("parsing {key} in last keybind edit"))
+    };
+    let live_previous = (doc.get("live_previous_present").and_then(Item::as_bool) == Some(true))
+        .then(|| document("live_previous"))
+        .transpose()?;
+    Ok(Some(UndoEntry {
+        profile_name: required("profile")?.to_string(),
+        profile_previous: document("profile_previous")?,
+        live_previous,
+        active_profile: required("active_profile")?.to_string(),
+    }))
+}
+
+fn clear_undo() -> Result<()> {
+    match fs::remove_file(config::undo_file()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("removing last keybind edit"),
+    }
+}
+
+fn commit_profile(
     profile_name: &str,
     active_profile: &str,
-    config_key: &str,
-    binding: &str,
+    profile: &DocumentMut,
 ) -> Result<UndoEntry> {
     let profile_path = config::profiles_dir().join(format!("{profile_name}.toml"));
-    let mut profile = keys::load(&profile_path)?;
-    let profile_previous = keys::get_item(&profile, config_key);
-    keys::set_scalar(&mut profile, config_key, binding);
-    keys::save(&profile_path, &profile)?;
+    if profile_name == DEFAULT_PROFILE {
+        anyhow::bail!("profile 'default' is read-only");
+    }
+    let profile_previous = keys::load(&profile_path)?;
+    keys::save(&profile_path, profile)?;
 
     let live_previous = if profile_name == active_profile {
         let config_path = config::config_path();
         let mut live = keys::load(&config_path)?;
-        let previous = keys::get_item(&live, config_key);
-        keys::set_scalar(&mut live, config_key, binding);
+        let previous = live.clone();
+        keys::apply_profile(&mut live, profile);
         keys::save(&config_path, &live)?;
         switch::reload_config()?;
-        previous
+        Some(previous)
     } else {
         None
     };
     Ok(UndoEntry {
         profile_name: profile_name.to_string(),
-        config_key: config_key.to_string(),
         profile_previous,
         live_previous,
+        active_profile: active_profile.to_string(),
     })
 }
 
-fn restore_binding(undo: &UndoEntry, active_profile: &str) -> Result<()> {
+fn restore_profile(undo: &UndoEntry, active_profile: &str) -> Result<()> {
     let profile_path = config::profiles_dir().join(format!("{}.toml", undo.profile_name));
-    let mut profile = keys::load(&profile_path)?;
-    match &undo.profile_previous {
-        Some(item) => keys::set_item(&mut profile, &undo.config_key, item.clone()),
-        None => keys::remove_scalar(&mut profile, &undo.config_key),
-    }
-    keys::save(&profile_path, &profile)?;
+    keys::save(&profile_path, &undo.profile_previous)?;
 
-    if undo.profile_name == active_profile {
+    if undo.profile_name == active_profile && undo.active_profile == active_profile {
         let config_path = config::config_path();
-        let mut live = keys::load(&config_path)?;
-        match &undo.live_previous {
-            Some(item) => keys::set_item(&mut live, &undo.config_key, item.clone()),
-            None => keys::remove_scalar(&mut live, &undo.config_key),
+        if let Some(live_previous) = &undo.live_previous {
+            keys::save(&config_path, live_previous)?;
+            switch::reload_config()?;
         }
-        keys::save(&config_path, &live)?;
-        switch::reload_config()?;
     }
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn footer_keys_use_a_remote_safe_emphasis() {
-        let lines = wrap_footer(&footer_segments(false, false, false, false), 76);
-        assert!(!lines.is_empty());
-        assert!(lines.iter().all(|line| line.contains(FG_WHITE)));
-    }
-
-    #[test]
-    fn key_event_binding_uses_herdr_names() {
-        let key = KeyEvent::new(
-            KeyCode::Char('R'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        );
-        assert_eq!(key_event_binding(&key).as_deref(), Some("ctrl+shift+r"));
-    }
-}
-
-fn render_row(row: &Row, width: usize, selected: bool) -> String {
+fn render_row(row: &Row, width: usize, highlight: Option<RowHighlight>, conflict: bool) -> String {
     match row {
         Row::Blank => String::new(),
         Row::Section(name) => format!("{LEFT_PAD}{BOLD}{CYAN}{name}{RESET}"),
@@ -597,10 +708,18 @@ fn render_row(row: &Row, width: usize, selected: bool) -> String {
             } else {
                 description.clone()
             };
-            if selected {
+            if let Some(highlight) = highlight {
+                let (background, foreground) = match highlight {
+                    RowHighlight::Editing => (BG_CYAN, FG_BLACK),
+                    RowHighlight::Listening => (BG_GREY, FG_WHITE),
+                    RowHighlight::Saved => (BG_GREEN, FG_BLACK),
+                    RowHighlight::Conflict => (BG_RED, FG_WHITE),
+                };
                 format!(
-                    "{BG_CYAN}{FG_BLACK}{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{BG_CYAN}{FG_BLACK}{desc}{RESET}"
+                    "{background}{foreground}{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{background}{foreground}{desc}{RESET}"
                 )
+            } else if conflict {
+                format!("{RED}{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{RED}{desc}{RESET}")
             } else {
                 format!("{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{desc}")
             }
@@ -622,11 +741,17 @@ struct ViewState {
     searching: bool,
     editing: Option<EditMode>,
     pending_binding: Option<String>,
+    manual_binding: String,
+    saved_row: Option<usize>,
     last_undo: Option<UndoEntry>,
+    original_profile: Option<DocumentMut>,
+    working_profile: Option<DocumentMut>,
+    staged_undo: Option<(String, Option<Item>)>,
 }
 
 impl ViewState {
     fn load() -> Result<Self> {
+        config::ensure_default_profile()?;
         let profiles = config::list_profiles()?;
         let active_profile = config::read_active_profile().unwrap_or_else(|| "?".to_string());
         let viewed_profile = profiles
@@ -651,15 +776,26 @@ impl ViewState {
             searching: false,
             editing: None,
             pending_binding: None,
-            last_undo: None,
+            manual_binding: String::new(),
+            saved_row: None,
+            last_undo: load_undo()?,
+            original_profile: None,
+            working_profile: None,
+            staged_undo: None,
         })
     }
 
     fn reload_viewed(&mut self) -> Result<()> {
         let offset = self.offset;
-        self.rows = match self.viewed_profile.as_deref() {
-            Some(name) => build_rows_for_profile(name)?,
-            None => build_rows_from_live_config()?,
+        let live = keys::load(&config::config_path())?;
+        self.rows = match (&self.viewed_profile, &self.working_profile) {
+            (Some(_), Some(profile)) => build_rows(profile, &live),
+            (Some(name), None) => {
+                let profile_path = config::profiles_dir().join(format!("{name}.toml"));
+                let profile = keys::load(&profile_path)?;
+                build_rows(&profile, &live)
+            }
+            (None, _) => build_rows_from_live_config()?,
         };
         self.filtered = filtered_indices(&self.rows, &self.query);
         self.offset = offset;
@@ -724,9 +860,26 @@ impl ViewState {
     }
 
     fn begin_edit(&mut self) {
-        if self.viewed_profile.is_some() {
+        if self.viewed_profile.as_deref() != Some(DEFAULT_PROFILE) {
+            let Some(profile_name) = self.viewed_profile.as_deref() else {
+                return;
+            };
+            let profile_path = config::profiles_dir().join(format!("{profile_name}.toml"));
+            let Ok(profile) = keys::load(&profile_path) else {
+                return;
+            };
             self.searching = false;
             self.query.clear();
+            self.refilter();
+            self.saved_row = None;
+            self.original_profile = Some(profile.clone());
+            self.working_profile = Some(profile);
+            self.staged_undo = None;
+            if self.reload_viewed().is_err() {
+                self.original_profile = None;
+                self.working_profile = None;
+                return;
+            }
             self.refilter();
             if let Some(row) = self.first_editable_row() {
                 self.editing = Some(EditMode::Selecting { row });
@@ -740,8 +893,11 @@ impl ViewState {
             return;
         };
         let (cols, term_rows) = terminal::size().unwrap_or((76, 22));
-        let footer_lines =
-            wrap_footer(&footer_segments(false, true, false, false), cols as usize).len();
+        let footer_lines = wrap_footer(
+            &footer_segments(false, true, false, false, false, false),
+            cols as usize,
+        )
+        .len();
         let viewport = (term_rows as usize).saturating_sub(6 + footer_lines).max(1);
         if position < self.offset {
             self.offset = position;
@@ -769,12 +925,14 @@ impl ViewState {
             (current + delta as usize).min(editable.len().saturating_sub(1))
         };
         let row = editable[next];
+        self.saved_row = None;
         self.editing = Some(EditMode::Selecting { row });
         self.keep_edit_row_visible(row);
     }
 
     fn listen_selected(&mut self) {
         if let Some(EditMode::Selecting { row }) = self.editing {
+            self.saved_row = None;
             self.pending_binding = None;
             self.editing = Some(EditMode::Listening {
                 row,
@@ -783,33 +941,187 @@ impl ViewState {
         }
     }
 
+    fn begin_manual_edit(&mut self) -> Result<()> {
+        let Some(EditMode::Selecting { row }) = self.editing else {
+            return Ok(());
+        };
+        let Some(config_key) = row_config_key(&self.rows[row]) else {
+            return Ok(());
+        };
+        let Some(profile_name) = self.viewed_profile.as_deref() else {
+            return Ok(());
+        };
+        self.saved_row = None;
+        self.manual_binding = self
+            .current_profile_binding(profile_name, config_key)?
+            .unwrap_or_default();
+        self.pending_binding = None;
+        self.editing = Some(EditMode::Manual { row });
+        Ok(())
+    }
+
     fn save_edit(&mut self, row: usize, binding: &str) -> Result<()> {
         let Some(config_key) = row_config_key(&self.rows[row]) else {
             return Ok(());
         };
-        let Some(profile_name) = self.viewed_profile.clone() else {
+        let Some(profile) = self.working_profile.as_mut() else {
             return Ok(());
         };
-        let undo = persist_binding(&profile_name, &self.active_profile, config_key, binding)?;
-        self.last_undo = Some(undo);
+        let previous = keys::get_item(profile, config_key);
+        keys::set_scalar(profile, config_key, binding);
+        self.staged_undo = Some((config_key.to_string(), previous));
+        self.saved_row = Some(row);
         self.pending_binding = None;
+        self.manual_binding.clear();
         self.reload_viewed()?;
         self.editing = Some(EditMode::Selecting { row });
         Ok(())
     }
 
+    fn current_profile_binding(
+        &self,
+        profile_name: &str,
+        config_key: &str,
+    ) -> Result<Option<String>> {
+        let profile = match self.working_profile.as_ref() {
+            Some(profile) => profile.clone(),
+            None => {
+                let path = config::profiles_dir().join(format!("{profile_name}.toml"));
+                keys::load(&path)?
+            }
+        };
+        let value = keys::scalar_overrides(&profile)
+            .into_iter()
+            .find(|(key, _)| key == config_key)
+            .map(|(_, value)| value)
+            .or_else(|| default_binding(config_key).map(str::to_string));
+        Ok(value)
+    }
+
+    fn has_unresolved_duplicates(&self) -> bool {
+        !duplicate_rows(&self.rows).is_empty()
+    }
+
+    fn has_pending_changes(&self) -> bool {
+        match (&self.original_profile, &self.working_profile) {
+            (Some(original), Some(working)) => original.to_string() != working.to_string(),
+            _ => false,
+        }
+    }
+
+    fn request_leave_edit(&mut self) {
+        let Some(EditMode::Selecting { row }) = self.editing else {
+            return;
+        };
+        if self.has_unresolved_duplicates() {
+            self.saved_row = None;
+            return;
+        }
+        if self.has_pending_changes() {
+            self.editing = Some(EditMode::Confirming { row });
+        } else {
+            self.discard_edit();
+        }
+    }
+
+    fn discard_edit(&mut self) {
+        self.original_profile = None;
+        self.working_profile = None;
+        self.staged_undo = None;
+        self.pending_binding = None;
+        self.manual_binding.clear();
+        self.editing = None;
+        self.saved_row = None;
+        let _ = self.reload_viewed();
+    }
+
+    fn confirm_save(&mut self) -> Result<()> {
+        let Some(profile_name) = self.viewed_profile.clone() else {
+            return Ok(());
+        };
+        let Some(profile) = self.working_profile.as_ref() else {
+            return Ok(());
+        };
+        if self.has_unresolved_duplicates() {
+            self.editing = self.editing.map(|editing| match editing {
+                EditMode::Confirming { row } | EditMode::Selecting { row } => {
+                    EditMode::Selecting { row }
+                }
+                other => other,
+            });
+            return Ok(());
+        }
+        let undo = commit_profile(&profile_name, &self.active_profile, profile)?;
+        save_undo(&undo)?;
+        self.last_undo = Some(undo);
+        self.original_profile = None;
+        self.working_profile = None;
+        self.staged_undo = None;
+        self.editing = None;
+        self.pending_binding = None;
+        self.manual_binding.clear();
+        self.reload_viewed()
+    }
+
     fn undo_last_edit(&mut self) -> Result<()> {
+        if let (Some(profile), Some((config_key, previous))) =
+            (self.working_profile.as_mut(), self.staged_undo.take())
+        {
+            match previous {
+                Some(item) => keys::set_item(profile, &config_key, item),
+                None => keys::remove_scalar(profile, &config_key),
+            }
+            self.saved_row = None;
+            self.reload_viewed()?;
+            return Ok(());
+        }
         let Some(undo) = self.last_undo.take() else {
             return Ok(());
         };
         if self.viewed_profile.as_deref() != Some(undo.profile_name.as_str()) {
-            self.last_undo = Some(undo);
-            return Ok(());
+            self.viewed_profile = Some(undo.profile_name.clone());
         }
-        restore_binding(&undo, &self.active_profile)?;
+        if let Err(error) = restore_profile(&undo, &self.active_profile) {
+            self.last_undo = Some(undo);
+            return Err(error);
+        }
+        clear_undo()?;
+        self.saved_row = None;
         self.pending_binding = None;
+        self.manual_binding.clear();
         self.reload_viewed()?;
         Ok(())
+    }
+
+    fn handle_manual_key(&mut self, key: &KeyEvent, row: usize) -> Result<()> {
+        if key.code == KeyCode::Char('u') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.manual_binding.clear();
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Enter => {
+                let binding = self.manual_binding.clone();
+                self.save_edit(row, &binding)
+            }
+            KeyCode::Esc => {
+                self.manual_binding.clear();
+                self.editing = Some(EditMode::Selecting { row });
+                Ok(())
+            }
+            KeyCode::Backspace => {
+                self.manual_binding.pop();
+                Ok(())
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
+            {
+                self.manual_binding.push(c);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn handle_listen_key(&mut self, key: &KeyEvent, row: usize, prefix_seen: bool) -> Result<()> {
@@ -845,8 +1157,9 @@ impl ViewState {
         }
         if key.code == KeyCode::Esc && !prefix_seen {
             let profile_name = self.viewed_profile.as_deref().unwrap_or_default();
-            let prefix =
-                profile_binding(profile_name, "prefix")?.unwrap_or_else(|| "ctrl+b".to_string());
+            let prefix = self
+                .current_profile_binding(profile_name, "prefix")?
+                .unwrap_or_else(|| "ctrl+b".to_string());
             if !binding.eq_ignore_ascii_case(&prefix) {
                 self.editing = Some(EditMode::Selecting { row });
                 return Ok(());
@@ -863,8 +1176,9 @@ impl ViewState {
         let Some(profile_name) = self.viewed_profile.as_deref() else {
             return Ok(());
         };
-        let prefix =
-            profile_binding(profile_name, "prefix")?.unwrap_or_else(|| "ctrl+b".to_string());
+        let prefix = self
+            .current_profile_binding(profile_name, "prefix")?
+            .unwrap_or_else(|| "ctrl+b".to_string());
         if binding.eq_ignore_ascii_case(&prefix) {
             self.editing = Some(EditMode::Listening {
                 row,
@@ -882,6 +1196,8 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     let cols = cols as usize;
 
     let listening = matches!(state.editing, Some(EditMode::Listening { .. }));
+    let manual = matches!(state.editing, Some(EditMode::Manual { .. }));
+    let confirming = matches!(state.editing, Some(EditMode::Confirming { .. }));
     let prefix_listening = match state.editing {
         Some(EditMode::Listening { row, .. }) => row_config_key(&state.rows[row]) == Some("prefix"),
         _ => false,
@@ -891,7 +1207,9 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
             state.searching,
             state.editing.is_some(),
             listening,
+            manual,
             prefix_listening,
+            confirming,
         ),
         cols,
     );
@@ -928,13 +1246,22 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
             state.query
         ));
     } else if let Some(editing) = state.editing {
-        let hint = if let Some(binding) = state.pending_binding.as_deref() {
+        let hint = if confirming {
+            "save changes to this keybind profile? y/enter yes; n discard; esc back".to_string()
+        } else if let Some(binding) = state.pending_binding.as_deref() {
             format!("captured {binding}; enter save; backspace retry; esc cancel")
+        } else if state.has_unresolved_duplicates() {
+            "duplicate keybinds are red; resolve every conflict before leaving edit mode"
+                .to_string()
         } else {
             match editing {
                 EditMode::Selecting { .. } => {
-                    "press enter to listen; esc to leave edit mode".to_string()
+                    "press enter to listen; m for manual text; esc to leave edit mode".to_string()
                 }
+                EditMode::Manual { .. } => format!(
+                    "binding: {}\u{2588}; ctrl+u clear; enter save; esc cancel",
+                    state.manual_binding
+                ),
                 EditMode::Listening { row, .. }
                     if row_config_key(&state.rows[row]) == Some("prefix") =>
                 {
@@ -947,25 +1274,49 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
                     "press direct key or this profile's prefix + key; terminal/Herdr may use it"
                         .to_string()
                 }
+                EditMode::Confirming { .. } => unreachable!(),
             }
         };
         buf.push_str(&format!("{LEFT_PAD}{DIM}{hint}{RESET}\x1b[K\r\n\r\n"));
     } else {
-        buf.push_str(&format!(
-            "{LEFT_PAD}{DIM}press / to filter by command or shortcut{RESET}\x1b[K\r\n\r\n"
-        ));
+        let hint = if state.viewed_profile.as_deref() == Some(DEFAULT_PROFILE) {
+            "default profile is read-only; press / to filter by command or shortcut"
+        } else {
+            "press / to filter by command or shortcut"
+        };
+        buf.push_str(&format!("{LEFT_PAD}{DIM}{hint}{RESET}\x1b[K\r\n\r\n"));
     }
     if state.filtered.is_empty() {
         buf.push_str(&format!("{LEFT_PAD}{DIM}no matches{RESET}\x1b[K\r\n"));
     }
+    let conflicts = if state.editing.is_some() {
+        duplicate_rows(&state.rows)
+    } else {
+        HashSet::new()
+    };
     let selected_row = state.editing.map(|editing| match editing {
-        EditMode::Selecting { row } | EditMode::Listening { row, .. } => row,
+        EditMode::Selecting { row } => (
+            row,
+            if conflicts.contains(&row) {
+                RowHighlight::Conflict
+            } else if state.saved_row == Some(row) {
+                RowHighlight::Saved
+            } else {
+                RowHighlight::Editing
+            },
+        ),
+        EditMode::Listening { row, .. } => (row, RowHighlight::Listening),
+        EditMode::Manual { row } => (row, RowHighlight::Listening),
+        EditMode::Confirming { row } => (row, RowHighlight::Editing),
     });
     for &idx in state.filtered.iter().skip(state.offset).take(viewport) {
         buf.push_str(&render_row(
             &state.rows[idx],
             cols,
-            selected_row == Some(idx),
+            selected_row
+                .filter(|(row, _)| *row == idx)
+                .map(|(_, highlight)| highlight),
+            conflicts.contains(&idx),
         ));
         buf.push_str("\x1b[K\r\n");
     }
@@ -1035,29 +1386,45 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                         match state.editing {
                             None => quit = true,
-                            Some(EditMode::Selecting { .. }) => state.editing = None,
+                            Some(EditMode::Selecting { .. }) => state.request_leave_edit(),
                             Some(EditMode::Listening { row, .. })
                                 if row_config_key(&state.rows[row]) == Some("prefix") =>
                             {
-                                state.editing = None;
+                                state.editing = Some(EditMode::Selecting { row });
                             }
                             Some(EditMode::Listening { row, prefix_seen }) => {
                                 state.handle_listen_key(&k, row, prefix_seen)?;
                             }
+                            Some(EditMode::Manual { row }) => {
+                                state.editing = Some(EditMode::Selecting { row });
+                            }
+                            Some(EditMode::Confirming { .. }) => {}
                         }
                     } else if let Some(editing) = state.editing {
                         match editing {
                             EditMode::Selecting { .. } => match k.code {
-                                KeyCode::Esc => state.editing = None,
+                                KeyCode::Esc => state.request_leave_edit(),
                                 KeyCode::Enter => state.listen_selected(),
                                 KeyCode::Char('j') | KeyCode::Down => state.move_edit_selection(1),
                                 KeyCode::Char('k') | KeyCode::Up => state.move_edit_selection(-1),
+                                KeyCode::Char('m') => state.begin_manual_edit()?,
                                 KeyCode::Char('u') => state.undo_last_edit()?,
                                 _ => {}
                             },
                             EditMode::Listening { row, prefix_seen } => {
                                 state.handle_listen_key(&k, row, prefix_seen)?;
                             }
+                            EditMode::Manual { row } => state.handle_manual_key(&k, row)?,
+                            EditMode::Confirming { .. } => match k.code {
+                                KeyCode::Char('y') | KeyCode::Enter => state.confirm_save()?,
+                                KeyCode::Char('n') => state.discard_edit(),
+                                KeyCode::Esc => {
+                                    if let Some(EditMode::Confirming { row }) = state.editing {
+                                        state.editing = Some(EditMode::Selecting { row });
+                                    }
+                                }
+                                _ => {}
+                            },
                         }
                     } else if state.searching {
                         match k.code {
@@ -1114,4 +1481,145 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn footer_keys_use_a_remote_safe_emphasis() {
+        let lines = wrap_footer(
+            &footer_segments(false, false, false, false, false, false),
+            76,
+        );
+        assert!(!lines.is_empty());
+        assert!(lines.iter().all(|line| line.contains(FG_WHITE)));
+    }
+
+    #[test]
+    fn key_event_binding_uses_herdr_names() {
+        let key = KeyEvent::new(
+            KeyCode::Char('R'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(key_event_binding(&key).as_deref(), Some("ctrl+shift+r"));
+    }
+
+    #[test]
+    fn shifted_punctuation_is_not_saved_with_a_redundant_shift_modifier() {
+        let key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert_eq!(key_event_binding(&key).as_deref(), Some("?"));
+    }
+
+    #[test]
+    fn edit_row_highlight_uses_the_mode_color() {
+        let row = Row::Entry {
+            config_key: Some("new_tab".to_string()),
+            key: "prefix+c".to_string(),
+            description: "open a tab".to_string(),
+        };
+
+        let listening = render_row(&row, 76, Some(RowHighlight::Listening), false);
+        assert!(listening.contains(BG_GREY));
+        assert!(listening.contains(FG_WHITE));
+
+        let saved = render_row(&row, 76, Some(RowHighlight::Saved), false);
+        assert!(saved.contains(BG_GREEN));
+        assert!(saved.contains(FG_BLACK));
+    }
+
+    #[test]
+    fn duplicate_rows_include_both_bindings_and_ignore_unset_rows() {
+        let rows = vec![
+            Row::Entry {
+                config_key: Some("one".to_string()),
+                key: "prefix+x".to_string(),
+                description: "one".to_string(),
+            },
+            Row::Entry {
+                config_key: Some("two".to_string()),
+                key: "PREFIX+X".to_string(),
+                description: "two".to_string(),
+            },
+            Row::Entry {
+                config_key: None,
+                key: "unset".to_string(),
+                description: "three".to_string(),
+            },
+        ];
+        let conflicts = duplicate_rows(&rows);
+        assert_eq!(conflicts, HashSet::from([0, 1]));
+    }
+
+    #[test]
+    fn duplicate_row_text_and_selector_use_ansi_red() {
+        let row = Row::Entry {
+            config_key: Some("one".to_string()),
+            key: "prefix+x".to_string(),
+            description: "one".to_string(),
+        };
+        let text = render_row(&row, 76, None, true);
+        let selector = render_row(&row, 76, Some(RowHighlight::Conflict), true);
+        assert!(text.contains(RED));
+        assert!(selector.contains(BG_RED));
+    }
+
+    fn test_state(rows: Vec<Row>, dirty: bool) -> ViewState {
+        let original: DocumentMut = "[keys]\none = \"prefix+a\"\n".parse().unwrap();
+        let working: DocumentMut = if dirty {
+            "[keys]\none = \"prefix+b\"\n".parse().unwrap()
+        } else {
+            original.clone()
+        };
+        ViewState {
+            profiles: vec!["work".to_string()],
+            viewed_profile: Some("work".to_string()),
+            filtered: (0..rows.len()).collect(),
+            rows,
+            active_profile: "work".to_string(),
+            offset: 0,
+            query: String::new(),
+            searching: false,
+            editing: Some(EditMode::Selecting { row: 0 }),
+            pending_binding: None,
+            manual_binding: String::new(),
+            saved_row: None,
+            last_undo: None,
+            original_profile: Some(original),
+            working_profile: Some(working),
+            staged_undo: None,
+        }
+    }
+
+    #[test]
+    fn unresolved_duplicate_blocks_leaving_edit_mode() {
+        let rows = vec![
+            Row::Entry {
+                config_key: Some("one".to_string()),
+                key: "prefix+x".to_string(),
+                description: "one".to_string(),
+            },
+            Row::Entry {
+                config_key: Some("two".to_string()),
+                key: "prefix+x".to_string(),
+                description: "two".to_string(),
+            },
+        ];
+        let mut state = test_state(rows, false);
+        state.request_leave_edit();
+        assert!(matches!(state.editing, Some(EditMode::Selecting { .. })));
+    }
+
+    #[test]
+    fn pending_changes_require_save_confirmation_before_leaving() {
+        let rows = vec![Row::Entry {
+            config_key: Some("one".to_string()),
+            key: "prefix+b".to_string(),
+            description: "one".to_string(),
+        }];
+        let mut state = test_state(rows, true);
+        state.request_leave_edit();
+        assert!(matches!(state.editing, Some(EditMode::Confirming { .. })));
+    }
 }

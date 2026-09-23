@@ -1,4 +1,5 @@
-use anyhow::{bail, Context, Result};
+use crate::keys;
+use anyhow::{Context, Result, bail};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -21,8 +22,7 @@ pub fn herdr_bin() -> String {
 }
 
 pub fn profiles_dir() -> PathBuf {
-    let config_dir =
-        env::var("HERDR_PLUGIN_CONFIG_DIR").expect("HERDR_PLUGIN_CONFIG_DIR not set");
+    let config_dir = env::var("HERDR_PLUGIN_CONFIG_DIR").expect("HERDR_PLUGIN_CONFIG_DIR not set");
     PathBuf::from(config_dir).join("profiles")
 }
 
@@ -31,9 +31,13 @@ pub fn state_file() -> PathBuf {
     PathBuf::from(state_dir).join("active-profile")
 }
 
+pub fn undo_file() -> PathBuf {
+    let state_dir = env::var("HERDR_PLUGIN_STATE_DIR").expect("HERDR_PLUGIN_STATE_DIR not set");
+    PathBuf::from(state_dir).join("last-keybind-edit.toml")
+}
+
 pub fn pending_name_file() -> PathBuf {
-    let config_dir =
-        env::var("HERDR_PLUGIN_CONFIG_DIR").expect("HERDR_PLUGIN_CONFIG_DIR not set");
+    let config_dir = env::var("HERDR_PLUGIN_CONFIG_DIR").expect("HERDR_PLUGIN_CONFIG_DIR not set");
     PathBuf::from(config_dir).join("pending-name")
 }
 
@@ -67,6 +71,20 @@ pub fn list_profiles() -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Ensure the immutable neutral profile exists. It is generated from the
+/// viewer's built-in defaults once and is never overwritten afterwards.
+pub fn ensure_default_profile() -> Result<()> {
+    let dir = profiles_dir();
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("default.toml");
+    if path.exists() {
+        return Ok(());
+    }
+
+    let profile = keys::default_profile();
+    keys::save(&path, &profile)
+}
+
 pub fn read_active_profile() -> Option<String> {
     let text = fs::read_to_string(state_file()).ok()?;
     let trimmed = text.trim();
@@ -91,10 +109,7 @@ pub fn write_active_profile(name: &str) -> Result<()> {
 pub fn pick_target(profiles: &[String]) -> Result<String> {
     if let Some(explicit) = take_pending_name()? {
         if !profiles.iter().any(|p| p == &explicit) {
-            bail!(
-                "profile '{explicit}' not found in {:?}",
-                profiles_dir()
-            );
+            bail!("profile '{explicit}' not found in {:?}", profiles_dir());
         }
         return Ok(explicit);
     }

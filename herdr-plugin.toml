@@ -44,10 +44,11 @@ title = "bindr: view keybinds"
 contexts = ["workspace"]
 command = ["./target/release/bindr", "show-keybinds"]
 
-# Read-only replica of the built-in prefix+? panel, plus shift+K to switch
-# profiles in place. Unlike "toast" this one keeps focus -- the user
-# scrolls and closes it interactively. Sized to match the built-in panel's
-# fixed 76x22 modal (see keybind_help.rs's render_modal_shell call).
+# Replica/editor of the built-in prefix+? panel, plus profile tabs and
+# shift+K to switch profiles in place. Unlike "toast" this one keeps focus --
+# the user can browse, edit, and close it interactively. Sized to match the
+# built-in panel's fixed 76x22 modal (see keybind_help.rs's render_modal_shell
+# call).
 [[panes]]
 id = "keybinds"
 title = "bindr"

@@ -4,7 +4,7 @@
 use crate::config;
 use anyhow::Result;
 use crossterm::{cursor, execute, terminal};
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 use std::thread::sleep;
 use std::time::Duration;
 

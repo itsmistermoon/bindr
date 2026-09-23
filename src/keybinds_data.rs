@@ -17,7 +17,11 @@ pub struct Row {
     pub description: &'static str,
 }
 
-const fn row(config_key: Option<&'static str>, default: &'static str, description: &'static str) -> Row {
+const fn row(
+    config_key: Option<&'static str>,
+    default: &'static str,
+    description: &'static str,
+) -> Row {
     Row {
         config_key,
         default,
@@ -66,7 +70,11 @@ pub static SECTIONS: &[Section] = &[
             row(Some("new_worktree"), "prefix+shift+g", "new worktree"),
             row(Some("open_worktree"), "", "open worktree"),
             row(Some("remove_worktree"), "", "delete worktree checkout"),
-            row(Some("rename_workspace"), "prefix+shift+w", "rename workspace"),
+            row(
+                Some("rename_workspace"),
+                "prefix+shift+w",
+                "rename workspace",
+            ),
             row(Some("close_workspace"), "prefix+shift+d", "close workspace"),
             row(Some("previous_workspace"), "", "previous workspace"),
             row(Some("next_workspace"), "", "next workspace"),

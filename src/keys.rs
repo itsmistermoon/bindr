@@ -7,6 +7,7 @@
 //! only the plain scalar fields (and the `indexed` subtable) while leaving
 //! the `command` array-of-tables node completely alone.
 
+use crate::keybinds_data;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
@@ -99,6 +100,21 @@ pub fn extract_keys_only(doc: &DocumentMut) -> DocumentMut {
     out
 }
 
+/// Build the neutral, read-only profile from the keybinds viewer's defaults.
+pub fn default_profile() -> DocumentMut {
+    let mut profile = DocumentMut::new();
+    for section in keybinds_data::SECTIONS {
+        for row in section.rows {
+            if let Some(config_key) = row.config_key
+                && !row.default.is_empty()
+            {
+                set_scalar(&mut profile, config_key, row.default);
+            }
+        }
+    }
+    profile
+}
+
 /// Scalar `[keys]` overrides as (config_key, value), skipping "command" and
 /// any subtables (e.g. `[keys.indexed]`).
 pub fn scalar_overrides(doc: &DocumentMut) -> Vec<(String, String)> {
@@ -136,4 +152,79 @@ pub fn custom_commands(doc: &DocumentMut) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn document(source: &str) -> DocumentMut {
+        source.parse().expect("valid TOML")
+    }
+
+    #[test]
+    fn profile_application_preserves_custom_commands_and_other_sections() {
+        let mut live = document(
+            r#"
+[keys]
+prefix = "ctrl+b"
+new_tab = "prefix+c"
+
+[[keys.command]]
+key = "prefix+alt+g"
+type = "popup"
+command = "lazygit"
+
+[theme]
+name = "catppuccin"
+"#,
+        );
+        let profile = document(
+            r#"
+[keys]
+prefix = "ctrl+a"
+close_tab = "prefix+shift+x"
+"#,
+        );
+
+        apply_profile(&mut live, &profile);
+
+        assert_eq!(live["keys"]["prefix"].as_str(), Some("ctrl+a"));
+        assert_eq!(live["keys"]["close_tab"].as_str(), Some("prefix+shift+x"));
+        assert!(live["keys"].as_table().unwrap().get("new_tab").is_none());
+        let command = live["keys"]["command"]
+            .as_array_of_tables()
+            .expect("custom command array");
+        let command = command.iter().next().expect("first custom command");
+        assert_eq!(command["command"].as_str(), Some("lazygit"));
+        assert_eq!(live["theme"]["name"].as_str(), Some("catppuccin"));
+    }
+
+    #[test]
+    fn scalar_updates_are_reversible_without_touching_other_keys() {
+        let mut doc = document(
+            r#"
+[keys]
+prefix = "ctrl+b"
+new_tab = "prefix+c"
+"#,
+        );
+        let previous = get_item(&doc, "prefix");
+
+        set_scalar(&mut doc, "prefix", "ctrl+a");
+        assert_eq!(doc["keys"]["prefix"].as_str(), Some("ctrl+a"));
+        assert_eq!(doc["keys"]["new_tab"].as_str(), Some("prefix+c"));
+
+        set_item(&mut doc, "prefix", previous.expect("prefix exists"));
+        assert_eq!(doc["keys"]["prefix"].as_str(), Some("ctrl+b"));
+    }
+
+    #[test]
+    fn default_profile_contains_only_neutral_builtin_bindings() {
+        let profile = default_profile();
+        assert_eq!(profile["keys"]["prefix"].as_str(), Some("ctrl+b"));
+        assert_eq!(profile["keys"]["new_tab"].as_str(), Some("prefix+c"));
+        assert!(profile["keys"].get("open_worktree").is_none());
+        assert!(profile["keys"].get("command").is_none());
+    }
 }

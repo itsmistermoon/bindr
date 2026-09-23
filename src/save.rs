@@ -1,5 +1,5 @@
 use crate::{config, keys};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -9,10 +9,15 @@ fn valid_name(name: &str) -> bool {
 }
 
 pub fn run() -> Result<()> {
-    let name = config::take_pending_name()?
-        .ok_or_else(|| anyhow!("no profile name given (write it to the pending-name file first)"))?;
+    config::ensure_default_profile()?;
+    let name = config::take_pending_name()?.ok_or_else(|| {
+        anyhow!("no profile name given (write it to the pending-name file first)")
+    })?;
     if !valid_name(&name) {
         bail!("invalid profile name '{name}': use only [a-zA-Z0-9_-]");
+    }
+    if name == "default" {
+        bail!("profile 'default' is reserved and cannot be overwritten");
     }
 
     let doc = keys::load(&config::config_path())?;
