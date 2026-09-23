@@ -40,7 +40,15 @@ Currently available:
 - Profile-save confirmation: leaving edit mode asks whether to save or discard
   the changes. Duplicate bindings are highlighted in red and prevent leaving
   until resolved.
-- Manual binding entry for Herdr range syntax such as `prefix+1..9`.
+- Manual binding entry for Herdr range syntax such as `prefix+1..9`, and
+  empty bindings (`Ctrl+U` then `Enter`), which are saved as `key = ""` and
+  shown as `unset`.
+- Persistent single-level undo: the last saved change is stored in
+  `HERDR_PLUGIN_STATE_DIR/last-keybind-edit.toml`, so `u` can revert it even
+  after reopening the popup, returning to the edited profile.
+- Row state colors using terminal ANSI slots: cyan for selection, grey while
+  listening or typing manually, green after a change is recorded, red for
+  duplicates.
 - The `default` profile is generated when needed, can be selected as a neutral
   fallback, and can never be edited or overwritten.
 - Editing the active profile updates Herdr after the profile-save confirmation;
@@ -54,12 +62,14 @@ Known limitations:
   operating system.
 - Custom `[[keys.command]]` bindings remain read-only and outside profiles by
   design.
+- Only duplicates within the profile are detected; collisions with terminal,
+  OS, or other plugins' bindings are not.
 
 ## Roadmap
 
 1. Create profiles from inside the keybinds popup.
 2. Improve profile management (multiple undo levels, rename/delete).
-4. Expand interactive testing across local, SSH, and tmux environments.
+3. Expand interactive testing across local, SSH, and tmux environments.
 
 ## Install
 
@@ -95,6 +105,14 @@ the currently active keybindings as a new profile:
 
 ```sh
 ./save-as.sh <profile-name>
+```
+
+## Development
+
+```sh
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo build --release
 ```
 
 ## How it works
