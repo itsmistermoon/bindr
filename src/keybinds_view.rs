@@ -778,7 +778,14 @@ impl ViewState {
             pending_binding: None,
             manual_binding: String::new(),
             saved_row: None,
-            last_undo: load_undo()?,
+            // An unreadable undo file must not block the viewer; drop it.
+            last_undo: match load_undo() {
+                Ok(undo) => undo,
+                Err(_) => {
+                    clear_undo()?;
+                    None
+                }
+            },
             original_profile: None,
             working_profile: None,
             staged_undo: None,
