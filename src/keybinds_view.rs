@@ -107,6 +107,12 @@ fn build_rows_for_profile(name: &str) -> Result<Vec<Row>> {
 /// made only of read-only custom commands are ignored because the editor
 /// cannot resolve them.
 fn duplicate_rows(rows: &[Row]) -> HashSet<usize> {
+    duplicate_partners(rows).into_keys().collect()
+}
+
+/// Map each duplicated row to the other rows sharing its shortcut, so the
+/// editor can name the exact conflict even when the partner is off screen.
+fn duplicate_partners(rows: &[Row]) -> HashMap<usize, Vec<usize>> {
     let mut occurrences: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, row) in rows.iter().enumerate() {
         let Row::Entry { key, .. } = row else {
@@ -128,8 +134,38 @@ fn duplicate_rows(rows: &[Row]) -> HashSet<usize> {
                     .iter()
                     .any(|&index| row_config_key(&rows[index]).is_some())
         })
-        .flatten()
+        .flat_map(|indices| {
+            indices
+                .iter()
+                .map(|&index| {
+                    let others = indices.iter().copied().filter(|&o| o != index).collect();
+                    (index, others)
+                })
+                .collect::<Vec<_>>()
+        })
         .collect()
+}
+
+/// Human label for a conflicting row: its description, marked when it is a
+/// read-only custom/plugin command.
+fn conflict_label(row: &Row) -> String {
+    match row {
+        Row::Entry {
+            config_key: None,
+            description,
+            ..
+        } => format!("{description} (custom)"),
+        Row::Entry { description, .. } => description.clone(),
+        _ => String::new(),
+    }
+}
+
+fn conflict_note(rows: &[Row], others: &[usize]) -> String {
+    others
+        .iter()
+        .map(|&index| conflict_label(&rows[index]))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Case-insensitive subsequence match, fzf-style but without the ranking.
@@ -295,6 +331,18 @@ fn footer_segments(
             FooterHint {
                 label: "manual",
                 key: "m",
+            },
+            FooterHint {
+                label: "next duplicate",
+                key: "d",
+            },
+            FooterHint {
+                label: "duplicates only",
+                key: "f",
+            },
+            FooterHint {
+                label: "scroll",
+                key: "pgup/pgdn",
             },
             FooterHint {
                 label: "back",
@@ -686,13 +734,24 @@ fn restore_profile(undo: &UndoEntry, active_profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_row(row: &Row, width: usize, highlight: Option<RowHighlight>, conflict: bool) -> String {
+/// `conflict` carries the labels of the rows sharing this shortcut; it is shown
+/// after the description so the partner is known without scrolling to it.
+fn render_row(
+    row: &Row,
+    width: usize,
+    highlight: Option<RowHighlight>,
+    conflict: Option<&str>,
+) -> String {
     match row {
         Row::Blank => String::new(),
         Row::Section(name) => format!("{LEFT_PAD}{BOLD}{CYAN}{name}{RESET}"),
         Row::Entry {
             key, description, ..
         } => {
+            let description = &match conflict {
+                Some(note) => format!("{description} \u{26a0} {note}"),
+                None => description.clone(),
+            };
             let desc_width = (width.saturating_sub(LEFT_PAD.len() + KEY_COL)).max(4);
             let desc = if description.chars().count() > desc_width {
                 let mut cut: String = description
@@ -718,7 +777,7 @@ fn render_row(row: &Row, width: usize, highlight: Option<RowHighlight>, conflict
                 format!(
                     "{background}{foreground}{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{background}{foreground}{desc}{RESET}"
                 )
-            } else if conflict {
+            } else if conflict.is_some() {
                 format!("{RED}{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{RED}{desc}{RESET}")
             } else {
                 format!("{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{desc}")
@@ -747,6 +806,8 @@ struct ViewState {
     original_profile: Option<DocumentMut>,
     working_profile: Option<DocumentMut>,
     staged_undo: Option<(String, Option<Item>)>,
+    /// Edit-mode quick filter: show only duplicated rows (plus the selection).
+    duplicates_only: bool,
 }
 
 impl ViewState {
@@ -789,6 +850,7 @@ impl ViewState {
             original_profile: None,
             working_profile: None,
             staged_undo: None,
+            duplicates_only: false,
         })
     }
 
@@ -804,7 +866,7 @@ impl ViewState {
             }
             (None, _) => build_rows_from_live_config()?,
         };
-        self.filtered = filtered_indices(&self.rows, &self.query);
+        self.filtered = self.visible_indices();
         self.offset = offset;
         Ok(())
     }
@@ -838,8 +900,76 @@ impl ViewState {
     /// Profile changes use `reload_viewed` instead so comparison scrolling is
     /// preserved.
     fn refilter(&mut self) {
-        self.filtered = filtered_indices(&self.rows, &self.query);
+        self.filtered = self.visible_indices();
         self.offset = 0;
+    }
+
+    /// Rows matching the query, narrowed to duplicates (with their section
+    /// headers) when the duplicates-only filter is on. The selected row stays
+    /// visible after it is fixed so the selection never disappears.
+    fn visible_indices(&self) -> Vec<usize> {
+        let matching = filtered_indices(&self.rows, &self.query);
+        if !self.duplicates_only {
+            return matching;
+        }
+        let duplicates = duplicate_rows(&self.rows);
+        let selected = self.editing.map(|editing| match editing {
+            EditMode::Selecting { row }
+            | EditMode::Listening { row, .. }
+            | EditMode::Manual { row }
+            | EditMode::Confirming { row } => row,
+        });
+        let mut result = Vec::new();
+        let mut section: Option<usize> = None;
+        for index in matching {
+            match self.rows[index] {
+                Row::Section(_) => section = Some(index),
+                Row::Blank => {}
+                Row::Entry { .. } => {
+                    if duplicates.contains(&index) || selected == Some(index) {
+                        if let Some(header) = section.take() {
+                            result.push(header);
+                        }
+                        result.push(index);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    fn toggle_duplicates_only(&mut self) {
+        self.duplicates_only = !self.duplicates_only;
+        self.refilter();
+        if let Some(EditMode::Selecting { row }) = self.editing {
+            self.keep_edit_row_visible(row);
+        }
+    }
+
+    /// Move the selection to the next editable duplicated row, wrapping.
+    fn next_duplicate(&mut self) {
+        let Some(EditMode::Selecting { row }) = self.editing else {
+            return;
+        };
+        let duplicates = duplicate_rows(&self.rows);
+        let candidates: Vec<usize> = self
+            .filtered
+            .iter()
+            .copied()
+            .filter(|index| {
+                duplicates.contains(index) && row_config_key(&self.rows[*index]).is_some()
+            })
+            .collect();
+        let Some(&next) = candidates
+            .iter()
+            .find(|&&index| index > row)
+            .or_else(|| candidates.first())
+        else {
+            return;
+        };
+        self.saved_row = None;
+        self.editing = Some(EditMode::Selecting { row: next });
+        self.keep_edit_row_visible(next);
     }
 
     /// Move the scroll offset by `delta` rows, clamping at zero.
@@ -877,6 +1007,7 @@ impl ViewState {
             };
             self.searching = false;
             self.query.clear();
+            self.duplicates_only = false;
             self.refilter();
             self.saved_row = None;
             self.original_profile = Some(profile.clone());
@@ -931,6 +1062,12 @@ impl ViewState {
         } else {
             (current + delta as usize).min(editable.len().saturating_sub(1))
         };
+        // Past the first/last editable row, keep scrolling so read-only rows
+        // (such as the trailing custom section) can still be reviewed.
+        if next == current {
+            self.scroll(delta);
+            return;
+        }
         let row = editable[next];
         self.saved_row = None;
         self.editing = Some(EditMode::Selecting { row });
@@ -1020,10 +1157,6 @@ impl ViewState {
         let Some(EditMode::Selecting { row }) = self.editing else {
             return;
         };
-        if self.has_unresolved_duplicates() {
-            self.saved_row = None;
-            return;
-        }
         if self.has_pending_changes() {
             self.editing = Some(EditMode::Confirming { row });
         } else {
@@ -1032,6 +1165,7 @@ impl ViewState {
     }
 
     fn discard_edit(&mut self) {
+        self.duplicates_only = false;
         self.original_profile = None;
         self.working_profile = None;
         self.staged_undo = None;
@@ -1063,6 +1197,7 @@ impl ViewState {
         self.last_undo = Some(undo);
         self.original_profile = None;
         self.working_profile = None;
+        self.duplicates_only = false;
         self.staged_undo = None;
         self.editing = None;
         self.pending_binding = None;
@@ -1198,6 +1333,26 @@ impl ViewState {
     }
 }
 
+/// Truncate `text` to `width` columns with an ellipsis. The hint line must never
+/// wrap: an extra line would push the output past the popup height and scroll
+/// the banner off screen.
+fn fit_line(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    cut.push('\u{2026}');
+    cut
+}
+
+/// Rows sharing the shortcut of the row selected in edit mode, if any.
+fn selected_conflict(state: &ViewState) -> Option<Vec<usize>> {
+    let Some(EditMode::Selecting { row }) = state.editing else {
+        return None;
+    };
+    duplicate_partners(&state.rows).remove(&row)
+}
+
 fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     let (cols, term_rows) = terminal::size()?;
     let cols = cols as usize;
@@ -1253,13 +1408,19 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
             state.query
         ));
     } else if let Some(editing) = state.editing {
-        let hint = if confirming {
+        let hint = if confirming && state.has_unresolved_duplicates() {
+            "resolve red duplicates to save; n discard; esc back".to_string()
+        } else if confirming {
             "save changes to this keybind profile? y/enter yes; n discard; esc back".to_string()
         } else if let Some(binding) = state.pending_binding.as_deref() {
             format!("captured {binding}; enter save; backspace retry; esc cancel")
+        } else if let Some(others) = selected_conflict(state) {
+            format!(
+                "also used by {}; d next duplicate; f duplicates only",
+                conflict_note(&state.rows, &others)
+            )
         } else if state.has_unresolved_duplicates() {
-            "duplicate keybinds are red; resolve every conflict before leaving edit mode"
-                .to_string()
+            "duplicates are red; resolve them to save, or esc to discard".to_string()
         } else {
             match editing {
                 EditMode::Selecting { .. } => {
@@ -1284,27 +1445,33 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
                 EditMode::Confirming { .. } => unreachable!(),
             }
         };
-        buf.push_str(&format!("{LEFT_PAD}{DIM}{hint}{RESET}\x1b[K\r\n\r\n"));
+        buf.push_str(&format!(
+            "{LEFT_PAD}{DIM}{}{RESET}\x1b[K\r\n\r\n",
+            fit_line(&hint, cols.saturating_sub(LEFT_PAD.len()))
+        ));
     } else {
         let hint = if state.viewed_profile.as_deref() == Some(DEFAULT_PROFILE) {
             "default profile is read-only; press / to filter by command or shortcut"
         } else {
             "press / to filter by command or shortcut"
         };
-        buf.push_str(&format!("{LEFT_PAD}{DIM}{hint}{RESET}\x1b[K\r\n\r\n"));
+        buf.push_str(&format!(
+            "{LEFT_PAD}{DIM}{}{RESET}\x1b[K\r\n\r\n",
+            fit_line(hint, cols.saturating_sub(LEFT_PAD.len()))
+        ));
     }
     if state.filtered.is_empty() {
         buf.push_str(&format!("{LEFT_PAD}{DIM}no matches{RESET}\x1b[K\r\n"));
     }
     let conflicts = if state.editing.is_some() {
-        duplicate_rows(&state.rows)
+        duplicate_partners(&state.rows)
     } else {
-        HashSet::new()
+        HashMap::new()
     };
     let selected_row = state.editing.map(|editing| match editing {
         EditMode::Selecting { row } => (
             row,
-            if conflicts.contains(&row) {
+            if conflicts.contains_key(&row) {
                 RowHighlight::Conflict
             } else if state.saved_row == Some(row) {
                 RowHighlight::Saved
@@ -1323,7 +1490,10 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
             selected_row
                 .filter(|(row, _)| *row == idx)
                 .map(|(_, highlight)| highlight),
-            conflicts.contains(&idx),
+            conflicts
+                .get(&idx)
+                .map(|others| conflict_note(&state.rows, others))
+                .as_deref(),
         ));
         buf.push_str("\x1b[K\r\n");
     }
@@ -1416,6 +1586,10 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                                 KeyCode::Char('k') | KeyCode::Up => state.move_edit_selection(-1),
                                 KeyCode::Char('m') => state.begin_manual_edit()?,
                                 KeyCode::Char('u') => state.undo_last_edit()?,
+                                KeyCode::Char('d') => state.next_duplicate(),
+                                KeyCode::Char('f') => state.toggle_duplicates_only(),
+                                KeyCode::PageDown => state.scroll(PAGE_STEP as isize),
+                                KeyCode::PageUp => state.scroll(-(PAGE_STEP as isize)),
                                 _ => {}
                             },
                             EditMode::Listening { row, prefix_seen } => {
@@ -1527,11 +1701,11 @@ mod tests {
             description: "open a tab".to_string(),
         };
 
-        let listening = render_row(&row, 76, Some(RowHighlight::Listening), false);
+        let listening = render_row(&row, 76, Some(RowHighlight::Listening), None);
         assert!(listening.contains(BG_GREY));
         assert!(listening.contains(FG_WHITE));
 
-        let saved = render_row(&row, 76, Some(RowHighlight::Saved), false);
+        let saved = render_row(&row, 76, Some(RowHighlight::Saved), None);
         assert!(saved.contains(BG_GREEN));
         assert!(saved.contains(FG_BLACK));
     }
@@ -1566,8 +1740,8 @@ mod tests {
             key: "prefix+x".to_string(),
             description: "one".to_string(),
         };
-        let text = render_row(&row, 76, None, true);
-        let selector = render_row(&row, 76, Some(RowHighlight::Conflict), true);
+        let text = render_row(&row, 76, None, Some("two"));
+        let selector = render_row(&row, 76, Some(RowHighlight::Conflict), Some("two"));
         assert!(text.contains(RED));
         assert!(selector.contains(BG_RED));
     }
@@ -1596,11 +1770,12 @@ mod tests {
             original_profile: Some(original),
             working_profile: Some(working),
             staged_undo: None,
+            duplicates_only: false,
         }
     }
 
     #[test]
-    fn unresolved_duplicate_blocks_leaving_edit_mode() {
+    fn unresolved_duplicate_blocks_saving_but_not_leaving() {
         let rows = vec![
             Row::Entry {
                 config_key: Some("one".to_string()),
@@ -1613,8 +1788,10 @@ mod tests {
                 description: "two".to_string(),
             },
         ];
-        let mut state = test_state(rows, false);
+        let mut state = test_state(rows, true);
         state.request_leave_edit();
+        assert!(matches!(state.editing, Some(EditMode::Confirming { .. })));
+        state.confirm_save().unwrap();
         assert!(matches!(state.editing, Some(EditMode::Selecting { .. })));
     }
 
@@ -1628,5 +1805,56 @@ mod tests {
         let mut state = test_state(rows, true);
         state.request_leave_edit();
         assert!(matches!(state.editing, Some(EditMode::Confirming { .. })));
+    }
+
+    fn conflict_rows() -> Vec<Row> {
+        vec![
+            Row::Section("panes".to_string()),
+            Row::Entry {
+                config_key: Some("focus_pane_up".to_string()),
+                key: "prefix+k".to_string(),
+                description: "focus pane up".to_string(),
+            },
+            Row::Entry {
+                config_key: Some("other".to_string()),
+                key: "prefix+o".to_string(),
+                description: "other".to_string(),
+            },
+            Row::Section("custom".to_string()),
+            Row::Entry {
+                config_key: None,
+                key: "prefix+k".to_string(),
+                description: "command bar".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn conflict_note_names_the_partner() {
+        let rows = conflict_rows();
+        let partners = duplicate_partners(&rows);
+        assert_eq!(conflict_note(&rows, &partners[&1]), "command bar (custom)");
+        assert_eq!(conflict_note(&rows, &partners[&4]), "focus pane up");
+    }
+
+    #[test]
+    fn duplicates_only_filter_keeps_conflicts_with_headers() {
+        let mut state = test_state(conflict_rows(), false);
+        state.editing = Some(EditMode::Selecting { row: 1 });
+        state.toggle_duplicates_only();
+        assert_eq!(state.filtered, vec![0, 1, 3, 4]);
+        state.toggle_duplicates_only();
+        assert_eq!(state.filtered, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn next_duplicate_selects_editable_conflict() {
+        let mut state = test_state(conflict_rows(), false);
+        state.editing = Some(EditMode::Selecting { row: 2 });
+        state.next_duplicate();
+        assert!(matches!(
+            state.editing,
+            Some(EditMode::Selecting { row: 1 })
+        ));
     }
 }

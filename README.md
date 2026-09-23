@@ -19,8 +19,9 @@ touching anything else (theme, UI settings, other plugins' keybinds, etc.).
   fuzzy-search entries with `/`. Captures require `enter` to stage a change;
   `backspace` retries and `u` undoes the last staged edit. Use `m` in edit mode
   to enter a binding manually, including ranges such as `prefix+1..9`.
-  Duplicate bindings are shown in ANSI red and block leaving edit mode until
-  resolved. The `default` profile is read-only.
+  Duplicate bindings are shown in ANSI red, each naming the action it collides
+  with; `d` jumps to the next duplicate and `f` shows only duplicates. They
+  block saving, not leaving edit mode. The `default` profile is read-only.
 - **Save profile** — snapshot your current `[keys]` table as a new named
   profile.
 
@@ -38,8 +39,11 @@ Currently available:
 - Safe capture confirmation: `enter` records a change in the editor,
   `backspace` retries, `esc` cancels, and `u` undoes the last staged edit.
 - Profile-save confirmation: leaving edit mode asks whether to save or discard
-  the changes. Duplicate bindings are highlighted in red and prevent leaving
-  until resolved.
+  the changes. Duplicate bindings are highlighted in red, name the conflicting
+  action (including custom/plugin commands), and block saving until resolved.
+- Duplicate navigation in edit mode: `d` jumps to the next duplicate, `f`
+  toggles a duplicates-only filter, and `pgup`/`pgdn` scroll to read-only rows
+  such as the trailing `custom` section.
 - Manual binding entry for Herdr range syntax such as `prefix+1..9`, and
   empty bindings (`Ctrl+U` then `Enter`), which are saved as `key = ""` and
   shown as `unset`.
@@ -96,7 +100,8 @@ and enters key listening mode. Press `m` in edit mode to type a binding
 manually; `Ctrl+U` clears the text, so a range can be entered as
 `prefix+1..9`. Press `esc` from the selector to review the pending profile
 changes, then `y`/`enter` to save or `n` to discard. Duplicate bindings are
-red and must be resolved before leaving edit mode. `default` is always
+red, show what they collide with, and must be resolved before saving; `d`
+jumps between them and `f` filters to them. `default` is always
 read-only. `u` undoes the last staged edit while editing, or the last saved
 profile change after reopening the popup.
 
