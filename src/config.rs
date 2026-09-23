@@ -36,6 +36,29 @@ pub fn undo_file() -> PathBuf {
     PathBuf::from(state_dir).join("last-keybind-edit.toml")
 }
 
+/// Plugin bindings displaced by a live profile override (command id ->
+/// binding); see `keys::apply_plugin_keys`.
+fn displaced_plugin_keys_file() -> PathBuf {
+    let state_dir = env::var("HERDR_PLUGIN_STATE_DIR").expect("HERDR_PLUGIN_STATE_DIR not set");
+    PathBuf::from(state_dir).join("displaced-plugin-keys.toml")
+}
+
+pub fn load_displaced_plugin_keys() -> Result<toml_edit::DocumentMut> {
+    let path = displaced_plugin_keys_file();
+    if !path.exists() {
+        return Ok(toml_edit::DocumentMut::new());
+    }
+    keys::load(&path)
+}
+
+pub fn save_displaced_plugin_keys(doc: &toml_edit::DocumentMut) -> Result<()> {
+    let path = displaced_plugin_keys_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    keys::save(&path, doc)
+}
+
 pub fn pending_name_file() -> PathBuf {
     let config_dir = env::var("HERDR_PLUGIN_CONFIG_DIR").expect("HERDR_PLUGIN_CONFIG_DIR not set");
     PathBuf::from(config_dir).join("pending-name")

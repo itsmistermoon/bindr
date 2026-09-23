@@ -2,7 +2,8 @@
 //! tabs: selecting a tab only changes the profile being viewed; shift+K still
 //! switches the active profile in Herdr without changing the selected tab.
 
-use crate::{config, keybinds_data, keys, switch};
+use crate::keys::Target;
+use crate::{config, keybinds_data, keys, save, switch};
 use anyhow::{Context, Result};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -37,7 +38,8 @@ enum Row {
     Section(String),
     Blank,
     Entry {
-        config_key: Option<String>,
+        /// What editing this row changes; `None` for read-only rows.
+        target: Option<Target>,
         key: String,
         description: String,
     },
@@ -53,9 +55,13 @@ fn display_value(v: &str) -> String {
         .join("+")
 }
 
+/// `displaced` holds plugin bindings currently replaced by a live profile
+/// override, so a profile without its own override shows the plugin's
+/// binding rather than whichever profile is active.
 fn build_rows(
     profile_doc: &toml_edit::DocumentMut,
     custom_doc: &toml_edit::DocumentMut,
+    displaced: &toml_edit::DocumentMut,
 ) -> Vec<Row> {
     let overrides: HashMap<String, String> =
         keys::scalar_overrides(profile_doc).into_iter().collect();
@@ -70,7 +76,7 @@ fn build_rows(
                 None => r.default,
             };
             rows.push(Row::Entry {
-                config_key: r.config_key.map(str::to_string),
+                target: r.config_key.map(|k| Target::Key(k.to_string())),
                 key: display_value(value),
                 description: r.description.to_string(),
             });
@@ -79,11 +85,23 @@ fn build_rows(
     }
 
     rows.push(Row::Section("custom".to_string()));
-    for (key, desc) in custom {
+    for command in custom {
+        let key = command
+            .id
+            .as_deref()
+            .and_then(|id| {
+                keys::plugin_binding(profile_doc, id).or_else(|| {
+                    displaced
+                        .get(id)
+                        .and_then(toml_edit::Item::as_str)
+                        .map(str::to_string)
+                })
+            })
+            .unwrap_or(command.key);
         rows.push(Row::Entry {
-            config_key: None,
+            target: command.id.map(Target::Command),
             key: display_value(&key),
-            description: desc,
+            description: command.description,
         });
     }
     rows
@@ -91,21 +109,25 @@ fn build_rows(
 
 fn build_rows_from_live_config() -> Result<Vec<Row>> {
     let doc = keys::load(&config::config_path())?;
-    Ok(build_rows(&doc, &doc))
+    Ok(build_rows(&doc, &doc, &DocumentMut::new()))
 }
 
 fn build_rows_for_profile(name: &str) -> Result<Vec<Row>> {
     let profile_path = config::profiles_dir().join(format!("{name}.toml"));
     let profile = keys::load(&profile_path)?;
     let live = keys::load(&config::config_path())?;
-    Ok(build_rows(&profile, &live))
+    Ok(build_rows(
+        &profile,
+        &live,
+        &config::load_displaced_plugin_keys()?,
+    ))
 }
 
 /// Return the row indices whose displayed shortcut occurs more than once.
 /// Unset bindings are intentionally ignored: several Herdr actions are
 /// unbound by default and those should not conflict with each other. Groups
-/// made only of read-only custom commands are ignored because the editor
-/// cannot resolve them.
+/// made only of read-only rows are ignored because the editor cannot resolve
+/// them.
 fn duplicate_rows(rows: &[Row]) -> HashSet<usize> {
     duplicate_partners(rows).into_keys().collect()
 }
@@ -132,7 +154,7 @@ fn duplicate_partners(rows: &[Row]) -> HashMap<usize, Vec<usize>> {
             indices.len() > 1
                 && indices
                     .iter()
-                    .any(|&index| row_config_key(&rows[index]).is_some())
+                    .any(|&index| row_target(&rows[index]).is_some())
         })
         .flat_map(|indices| {
             indices
@@ -147,11 +169,11 @@ fn duplicate_partners(rows: &[Row]) -> HashMap<usize, Vec<usize>> {
 }
 
 /// Human label for a conflicting row: its description, marked when it is a
-/// read-only custom/plugin command.
+/// custom/plugin command.
 fn conflict_label(row: &Row) -> String {
     match row {
         Row::Entry {
-            config_key: None,
+            target: None | Some(Target::Command(_)),
             description,
             ..
         } => format!("{description} (custom)"),
@@ -235,6 +257,7 @@ struct FooterHint {
 }
 
 fn footer_segments(
+    naming: bool,
     searching: bool,
     editing: bool,
     listening: bool,
@@ -242,7 +265,22 @@ fn footer_segments(
     prefix_listening: bool,
     confirming: bool,
 ) -> Vec<FooterHint> {
-    if searching {
+    if naming {
+        vec![
+            FooterHint {
+                label: "name",
+                key: "a-z/0-9/-/_",
+            },
+            FooterHint {
+                label: "create",
+                key: "enter",
+            },
+            FooterHint {
+                label: "cancel",
+                key: "esc",
+            },
+        ]
+    } else if searching {
         vec![
             FooterHint {
                 label: "filter",
@@ -333,6 +371,10 @@ fn footer_segments(
                 key: "m",
             },
             FooterHint {
+                label: "unset",
+                key: "x",
+            },
+            FooterHint {
                 label: "next duplicate",
                 key: "d",
             },
@@ -374,6 +416,10 @@ fn footer_segments(
             FooterHint {
                 label: "switch active profile",
                 key: "shift+k",
+            },
+            FooterHint {
+                label: "new profile",
+                key: "shift+n",
             },
             FooterHint {
                 label: "close",
@@ -554,12 +600,17 @@ enum RowHighlight {
     Conflict,
 }
 
-fn row_config_key(row: &Row) -> Option<&str> {
+fn row_target(row: &Row) -> Option<&Target> {
     match row {
-        Row::Entry {
-            config_key: Some(key),
-            ..
-        } => Some(key),
+        Row::Entry { target, .. } => target.as_ref(),
+        _ => None,
+    }
+}
+
+/// The built-in `[keys]` name of a row, if it is one (e.g. `prefix`).
+fn row_config_key(row: &Row) -> Option<&str> {
+    match row_target(row) {
+        Some(Target::Key(key)) => Some(key),
         _ => None,
     }
 }
@@ -702,11 +753,7 @@ fn commit_profile(
     keys::save(&profile_path, profile)?;
 
     let live_previous = if profile_name == active_profile {
-        let config_path = config::config_path();
-        let mut live = keys::load(&config_path)?;
-        let previous = live.clone();
-        keys::apply_profile(&mut live, profile);
-        keys::save(&config_path, &live)?;
+        let previous = switch::apply_to_config(profile)?;
         switch::reload_config()?;
         Some(previous)
     } else {
@@ -805,9 +852,13 @@ struct ViewState {
     last_undo: Option<UndoEntry>,
     original_profile: Option<DocumentMut>,
     working_profile: Option<DocumentMut>,
-    staged_undo: Option<(String, Option<Item>)>,
+    staged_undo: Option<(Target, Option<Item>)>,
     /// Edit-mode quick filter: show only duplicated rows (plus the selection).
     duplicates_only: bool,
+    /// Name being typed for a new profile (shift+N), if any.
+    naming: Option<String>,
+    /// One-shot message for the hint line, cleared on the next key.
+    notice: Option<String>,
 }
 
 impl ViewState {
@@ -851,18 +902,21 @@ impl ViewState {
             working_profile: None,
             staged_undo: None,
             duplicates_only: false,
+            naming: None,
+            notice: None,
         })
     }
 
     fn reload_viewed(&mut self) -> Result<()> {
         let offset = self.offset;
         let live = keys::load(&config::config_path())?;
+        let displaced = config::load_displaced_plugin_keys()?;
         self.rows = match (&self.viewed_profile, &self.working_profile) {
-            (Some(_), Some(profile)) => build_rows(profile, &live),
+            (Some(_), Some(profile)) => build_rows(profile, &live, &displaced),
             (Some(name), None) => {
                 let profile_path = config::profiles_dir().join(format!("{name}.toml"));
                 let profile = keys::load(&profile_path)?;
-                build_rows(&profile, &live)
+                build_rows(&profile, &live, &displaced)
             }
             (None, _) => build_rows_from_live_config()?,
         };
@@ -956,9 +1010,7 @@ impl ViewState {
             .filtered
             .iter()
             .copied()
-            .filter(|index| {
-                duplicates.contains(index) && row_config_key(&self.rows[*index]).is_some()
-            })
+            .filter(|index| duplicates.contains(index) && row_target(&self.rows[*index]).is_some())
             .collect();
         let Some(&next) = candidates
             .iter()
@@ -993,7 +1045,7 @@ impl ViewState {
         self.filtered
             .iter()
             .copied()
-            .find(|&index| row_config_key(&self.rows[index]).is_some())
+            .find(|&index| row_target(&self.rows[index]).is_some())
     }
 
     fn begin_edit(&mut self) {
@@ -1032,7 +1084,7 @@ impl ViewState {
         };
         let (cols, term_rows) = terminal::size().unwrap_or((76, 22));
         let footer_lines = wrap_footer(
-            &footer_segments(false, true, false, false, false, false),
+            &footer_segments(false, false, true, false, false, false, false),
             cols as usize,
         )
         .len();
@@ -1052,7 +1104,7 @@ impl ViewState {
             .filtered
             .iter()
             .copied()
-            .filter(|&index| row_config_key(&self.rows[index]).is_some())
+            .filter(|&index| row_target(&self.rows[index]).is_some())
             .collect();
         let Some(current) = editable.iter().position(|&index| index == row) else {
             return;
@@ -1085,35 +1137,82 @@ impl ViewState {
         }
     }
 
+    /// Create the profile named in `naming` as a copy of the viewed one, then
+    /// view it. Errors are shown in the hint line and keep the name prompt.
+    fn create_profile(&mut self) -> Result<()> {
+        let Some(name) = self.naming.clone() else {
+            return Ok(());
+        };
+        let error = if !save::valid_name(&name) {
+            Some("use only letters, digits, - and _".to_string())
+        } else if self.profiles.contains(&name) {
+            Some(format!("profile '{name}' already exists"))
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.naming = None;
+            self.notice = Some(error);
+            return Ok(());
+        }
+        let base = self.viewed_profile.clone().unwrap_or_else(|| DEFAULT_PROFILE.to_string());
+        let dir = config::profiles_dir();
+        let profile = keys::load(&dir.join(format!("{base}.toml")))?;
+        keys::save(&dir.join(format!("{name}.toml")), &profile)?;
+        self.naming = None;
+        self.profiles = config::list_profiles()?;
+        self.viewed_profile = Some(name.clone());
+        self.notice = Some(format!("created '{name}' from '{base}'; press e to edit"));
+        self.reload_viewed()
+    }
+
+    /// Stage an empty binding (`key = ""`) for the selected row.
+    fn unset_selected(&mut self) -> Result<()> {
+        let Some(EditMode::Selecting { row }) = self.editing else {
+            return Ok(());
+        };
+        // Herdr needs a prefix key; everything else may be unbound.
+        if row_config_key(&self.rows[row]) == Some("prefix") {
+            return Ok(());
+        }
+        self.save_edit(row, "")
+    }
+
     fn begin_manual_edit(&mut self) -> Result<()> {
         let Some(EditMode::Selecting { row }) = self.editing else {
             return Ok(());
         };
-        let Some(config_key) = row_config_key(&self.rows[row]) else {
+        let Some(target) = row_target(&self.rows[row]).cloned() else {
             return Ok(());
         };
         let Some(profile_name) = self.viewed_profile.as_deref() else {
             return Ok(());
         };
         self.saved_row = None;
-        self.manual_binding = self
-            .current_profile_binding(profile_name, config_key)?
-            .unwrap_or_default();
+        self.manual_binding = match &target {
+            Target::Key(config_key) => self.current_profile_binding(profile_name, config_key)?,
+            // Plugin rows already display the effective binding.
+            Target::Command(_) => match &self.rows[row] {
+                Row::Entry { key, .. } if key != "unset" => Some(key.clone()),
+                _ => None,
+            },
+        }
+        .unwrap_or_default();
         self.pending_binding = None;
         self.editing = Some(EditMode::Manual { row });
         Ok(())
     }
 
     fn save_edit(&mut self, row: usize, binding: &str) -> Result<()> {
-        let Some(config_key) = row_config_key(&self.rows[row]) else {
+        let Some(target) = row_target(&self.rows[row]).cloned() else {
             return Ok(());
         };
         let Some(profile) = self.working_profile.as_mut() else {
             return Ok(());
         };
-        let previous = keys::get_item(profile, config_key);
-        keys::set_scalar(profile, config_key, binding);
-        self.staged_undo = Some((config_key.to_string(), previous));
+        let previous = target.get_item(profile);
+        target.set(profile, binding);
+        self.staged_undo = Some((target, previous));
         self.saved_row = Some(row);
         self.pending_binding = None;
         self.manual_binding.clear();
@@ -1206,12 +1305,12 @@ impl ViewState {
     }
 
     fn undo_last_edit(&mut self) -> Result<()> {
-        if let (Some(profile), Some((config_key, previous))) =
+        if let (Some(profile), Some((target, previous))) =
             (self.working_profile.as_mut(), self.staged_undo.take())
         {
             match previous {
-                Some(item) => keys::set_item(profile, &config_key, item),
-                None => keys::remove_scalar(profile, &config_key),
+                Some(item) => target.set_item(profile, item),
+                None => target.remove(profile),
             }
             self.saved_row = None;
             self.reload_viewed()?;
@@ -1267,11 +1366,11 @@ impl ViewState {
     }
 
     fn handle_listen_key(&mut self, key: &KeyEvent, row: usize, prefix_seen: bool) -> Result<()> {
-        let Some(config_key) = row_config_key(&self.rows[row]) else {
+        if row_target(&self.rows[row]).is_none() {
             self.editing = Some(EditMode::Selecting { row });
             return Ok(());
-        };
-        let is_prefix = config_key == "prefix";
+        }
+        let is_prefix = row_config_key(&self.rows[row]) == Some("prefix");
         if let Some(pending) = self.pending_binding.clone() {
             match key.code {
                 KeyCode::Enter => return self.save_edit(row, &pending),
@@ -1366,6 +1465,7 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     };
     let footer_lines = wrap_footer(
         &footer_segments(
+            state.naming.is_some(),
             state.searching,
             state.editing.is_some(),
             listening,
@@ -1402,7 +1502,12 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     buf.push_str(LEFT_PAD);
     buf.push_str(&tabs);
     buf.push_str("\x1b[K\r\n\r\n");
-    if state.searching {
+    if let Some(name) = &state.naming {
+        let base = state.viewed_profile.as_deref().unwrap_or(DEFAULT_PROFILE);
+        buf.push_str(&format!(
+            "{LEFT_PAD}{BOLD}new profile from {base}:{RESET} {name}\u{2588}\x1b[K\r\n\r\n",
+        ));
+    } else if state.searching {
         buf.push_str(&format!(
             "{LEFT_PAD}{BOLD}/{RESET}{}\u{2588}\x1b[K\r\n\r\n",
             state.query
@@ -1450,7 +1555,9 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
             fit_line(&hint, cols.saturating_sub(LEFT_PAD.len()))
         ));
     } else {
-        let hint = if state.viewed_profile.as_deref() == Some(DEFAULT_PROFILE) {
+        let hint = if let Some(notice) = &state.notice {
+            notice.as_str()
+        } else if state.viewed_profile.as_deref() == Some(DEFAULT_PROFILE) {
             "default profile is read-only; press / to filter by command or shortcut"
         } else {
             "press / to filter by command or shortcut"
@@ -1560,6 +1667,7 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                     _ => {}
                 },
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    state.notice = None;
                     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                         match state.editing {
                             None => quit = true,
@@ -1585,6 +1693,7 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                                 KeyCode::Char('j') | KeyCode::Down => state.move_edit_selection(1),
                                 KeyCode::Char('k') | KeyCode::Up => state.move_edit_selection(-1),
                                 KeyCode::Char('m') => state.begin_manual_edit()?,
+                                KeyCode::Char('x') => state.unset_selected()?,
                                 KeyCode::Char('u') => state.undo_last_edit()?,
                                 KeyCode::Char('d') => state.next_duplicate(),
                                 KeyCode::Char('f') => state.toggle_duplicates_only(),
@@ -1606,6 +1715,23 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                                 }
                                 _ => {}
                             },
+                        }
+                    } else if let Some(name) = state.naming.as_mut() {
+                        match k.code {
+                            KeyCode::Esc => state.naming = None,
+                            KeyCode::Enter => state.create_profile()?,
+                            KeyCode::Backspace => {
+                                name.pop();
+                            }
+                            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                                name.clear();
+                            }
+                            KeyCode::Char(c)
+                                if c.is_ascii_alphanumeric() || c == '-' || c == '_' =>
+                            {
+                                name.push(c);
+                            }
+                            _ => {}
                         }
                     } else if state.searching {
                         match k.code {
@@ -1649,6 +1775,7 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                             KeyCode::PageDown => state.scroll(PAGE_STEP as isize),
                             KeyCode::PageUp => state.scroll(-(PAGE_STEP as isize)),
                             KeyCode::Char('K') => state.switch_profile()?,
+                            KeyCode::Char('N') => state.naming = Some(String::new()),
                             _ => {}
                         }
                     }
@@ -1671,7 +1798,7 @@ mod tests {
     #[test]
     fn footer_keys_use_a_remote_safe_emphasis() {
         let lines = wrap_footer(
-            &footer_segments(false, false, false, false, false, false),
+            &footer_segments(false, false, false, false, false, false, false),
             76,
         );
         assert!(!lines.is_empty());
@@ -1696,7 +1823,7 @@ mod tests {
     #[test]
     fn edit_row_highlight_uses_the_mode_color() {
         let row = Row::Entry {
-            config_key: Some("new_tab".to_string()),
+            target: Some(Target::Key("new_tab".to_string())),
             key: "prefix+c".to_string(),
             description: "open a tab".to_string(),
         };
@@ -1714,17 +1841,17 @@ mod tests {
     fn duplicate_rows_include_both_bindings_and_ignore_unset_rows() {
         let rows = vec![
             Row::Entry {
-                config_key: Some("one".to_string()),
+                target: Some(Target::Key("one".to_string())),
                 key: "prefix+x".to_string(),
                 description: "one".to_string(),
             },
             Row::Entry {
-                config_key: Some("two".to_string()),
+                target: Some(Target::Key("two".to_string())),
                 key: "PREFIX+X".to_string(),
                 description: "two".to_string(),
             },
             Row::Entry {
-                config_key: None,
+                target: None,
                 key: "unset".to_string(),
                 description: "three".to_string(),
             },
@@ -1736,7 +1863,7 @@ mod tests {
     #[test]
     fn duplicate_row_text_and_selector_use_ansi_red() {
         let row = Row::Entry {
-            config_key: Some("one".to_string()),
+            target: Some(Target::Key("one".to_string())),
             key: "prefix+x".to_string(),
             description: "one".to_string(),
         };
@@ -1771,6 +1898,8 @@ mod tests {
             working_profile: Some(working),
             staged_undo: None,
             duplicates_only: false,
+            naming: None,
+            notice: None,
         }
     }
 
@@ -1778,12 +1907,12 @@ mod tests {
     fn unresolved_duplicate_blocks_saving_but_not_leaving() {
         let rows = vec![
             Row::Entry {
-                config_key: Some("one".to_string()),
+                target: Some(Target::Key("one".to_string())),
                 key: "prefix+x".to_string(),
                 description: "one".to_string(),
             },
             Row::Entry {
-                config_key: Some("two".to_string()),
+                target: Some(Target::Key("two".to_string())),
                 key: "prefix+x".to_string(),
                 description: "two".to_string(),
             },
@@ -1798,7 +1927,7 @@ mod tests {
     #[test]
     fn pending_changes_require_save_confirmation_before_leaving() {
         let rows = vec![Row::Entry {
-            config_key: Some("one".to_string()),
+            target: Some(Target::Key("one".to_string())),
             key: "prefix+b".to_string(),
             description: "one".to_string(),
         }];
@@ -1811,18 +1940,18 @@ mod tests {
         vec![
             Row::Section("panes".to_string()),
             Row::Entry {
-                config_key: Some("focus_pane_up".to_string()),
+                target: Some(Target::Key("focus_pane_up".to_string())),
                 key: "prefix+k".to_string(),
                 description: "focus pane up".to_string(),
             },
             Row::Entry {
-                config_key: Some("other".to_string()),
+                target: Some(Target::Key("other".to_string())),
                 key: "prefix+o".to_string(),
                 description: "other".to_string(),
             },
             Row::Section("custom".to_string()),
             Row::Entry {
-                config_key: None,
+                target: None,
                 key: "prefix+k".to_string(),
                 description: "command bar".to_string(),
             },

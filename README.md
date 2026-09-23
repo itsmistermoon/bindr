@@ -22,14 +22,15 @@ touching anything else (theme, UI settings, other plugins' keybinds, etc.).
   Duplicate bindings are shown in ANSI red, each naming the action it collides
   with; `d` jumps to the next duplicate and `f` shows only duplicates. They
   block saving, not leaving edit mode. The `default` profile is read-only.
-- **Save profile** — snapshot your current `[keys]` table as a new named
-  profile.
+- **New profile** — `shift+n` in the popup copies the viewed profile under a
+  new name, or `save-as.sh` snapshots the live keybindings (including plugin
+  keybinds rebound by the active profile).
 
 ## Current status
 
 `bindr` is functional but still in active development. The profile editor is
-available for existing profiles; profile creation and management remain on the
-roadmap.
+available, and new profiles can be created from the popup; rename/delete remain
+on the roadmap.
 
 Currently available:
 
@@ -42,11 +43,11 @@ Currently available:
   the changes. Duplicate bindings are highlighted in red, name the conflicting
   action (including custom/plugin commands), and block saving until resolved.
 - Duplicate navigation in edit mode: `d` jumps to the next duplicate, `f`
-  toggles a duplicates-only filter, and `pgup`/`pgdn` scroll to read-only rows
-  such as the trailing `custom` section.
+  toggles a duplicates-only filter, and `pgup`/`pgdn` scroll the list.
+- Per-profile plugin keybinds: rows in the `custom` section (`[[keys.command]]`
+  blocks) are editable and saved in the profile's `[plugin_keys]` table.
 - Manual binding entry for Herdr range syntax such as `prefix+1..9`, and
-  empty bindings (`Ctrl+U` then `Enter`), which are saved as `key = ""` and
-  shown as `unset`.
+  `x` to unset a binding (saved as `""`, shown as `unset`).
 - Persistent single-level undo: the last saved change is stored in
   `HERDR_PLUGIN_STATE_DIR/last-keybind-edit.toml`, so `u` can revert it even
   after reopening the popup, returning to the edited profile.
@@ -60,20 +61,16 @@ Currently available:
 
 Known limitations:
 
-- Profile creation still requires `save-as.sh`.
 - Undo currently has one level.
 - Some shortcuts can be intercepted by the terminal, SSH/tmux, Herdr, or the
   operating system.
-- Custom `[[keys.command]]` bindings remain read-only and outside profiles by
-  design.
 - Only duplicates within the profile are detected; collisions with terminal,
   OS, or other plugins' bindings are not.
 
 ## Roadmap
 
-1. Create profiles from inside the keybinds popup.
-2. Improve profile management (multiple undo levels, rename/delete).
-3. Expand interactive testing across local, SSH, and tmux environments.
+1. Improve profile management (multiple undo levels, rename/delete).
+2. Expand interactive testing across local, SSH, and tmux environments.
 
 ## Install
 
@@ -98,15 +95,19 @@ Inside the keybinds popup, use `←/→` or click to browse profiles without
 activating them. Press `e` to edit the viewed profile; `Enter` selects a row
 and enters key listening mode. Press `m` in edit mode to type a binding
 manually; `Ctrl+U` clears the text, so a range can be entered as
-`prefix+1..9`. Press `esc` from the selector to review the pending profile
+`prefix+1..9`. Press `x` to unset the selected binding (not allowed for
+`prefix`). Press `esc` from the selector to review the pending profile
 changes, then `y`/`enter` to save or `n` to discard. Duplicate bindings are
 red, show what they collide with, and must be resolved before saving; `d`
 jumps between them and `f` filters to them. `default` is always
 read-only. `u` undoes the last staged edit while editing, or the last saved
 profile change after reopening the popup.
 
+Press `shift+n` to create a new profile as a copy of the viewed one; type a
+name (letters, digits, `-`, `_`) and press `enter`.
+
 Profiles live under `HERDR_PLUGIN_CONFIG_DIR/profiles/<name>.toml`. To save
-the currently active keybindings as a new profile:
+the currently active keybindings as a new profile from the shell:
 
 ```sh
 ./save-as.sh <profile-name>
@@ -122,10 +123,21 @@ cargo build --release
 
 ## How it works
 
-Each profile file holds only the `[keys]` table (and any `[keys.*]` dotted
-subtables). Switching a profile surgically replaces just that table in the
-live `config.toml`, leaving `[[keys.command]]` entries (used by this and
-other plugins) and every other section untouched.
+Each profile file holds the `[keys]` table (and any `[keys.*]` dotted
+subtables), plus an optional `[plugin_keys]` table mapping plugin command ids
+to bindings:
+
+```toml
+[plugin_keys]
+"herdr-bar.open" = "cmd+k"
+```
+
+Switching a profile surgically replaces `[keys]` in the live `config.toml`
+and rewrites only the `key` field of matching `[[keys.command]]` blocks;
+blocks are never created or removed, since plugins own them. The plugin's own
+binding is remembered in `HERDR_PLUGIN_STATE_DIR/displaced-plugin-keys.toml`
+while an override is live, and restored when switching to a profile without
+one. Every other section is left untouched.
 
 Built with [`toml_edit`](https://docs.rs/toml_edit) for format-preserving
 edits and [`crossterm`](https://docs.rs/crossterm) for the interactive

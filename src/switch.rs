@@ -9,6 +9,20 @@
 use crate::{config, keys, pane};
 use anyhow::{Result, bail};
 use std::process::Command;
+use toml_edit::DocumentMut;
+
+/// Write `profile` into the live config.toml and return the config as it was
+/// before, for undo. Does not reload Herdr.
+pub fn apply_to_config(profile: &DocumentMut) -> Result<DocumentMut> {
+    let cfg_path = config::config_path();
+    let mut doc = keys::load(&cfg_path)?;
+    let previous = doc.clone();
+    let mut displaced = config::load_displaced_plugin_keys()?;
+    keys::apply_profile(&mut doc, profile, &mut displaced);
+    keys::save(&cfg_path, &doc)?;
+    config::save_displaced_plugin_keys(&displaced)?;
+    Ok(previous)
+}
 
 pub fn reload_config() -> Result<()> {
     let output = Command::new(config::herdr_bin())
@@ -36,10 +50,7 @@ pub fn switch_to_next() -> Result<String> {
     let profile_path = config::profiles_dir().join(format!("{target}.toml"));
     let profile_doc = keys::load(&profile_path)?;
 
-    let cfg_path = config::config_path();
-    let mut doc = keys::load(&cfg_path)?;
-    keys::apply_profile(&mut doc, &profile_doc);
-    keys::save(&cfg_path, &doc)?;
+    apply_to_config(&profile_doc)?;
 
     config::write_active_profile(&target)?;
 
