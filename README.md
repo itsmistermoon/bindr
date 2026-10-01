@@ -6,11 +6,15 @@ profile in a terminal popup. Profiles contain a `[keys]` table and optional
 plugin command overrides; switching changes only those bindings in Herdr's
 configuration.
 
-![The bindr keybinds popup with profile tabs, filter field, and bindings](docs/media/bindr-keybinds.png)
+<p align="center">
+  <img src="docs/media/bindr-keybinds.png" alt="The bindr keybinds popup with profile tabs, filter field, and bindings">
+</p>
 
-**Profile switch toast**
+<p align="center"><strong>Profile switch toast</strong></p>
 
-![The toast showing the active bindr profile](docs/media/bindr-toast.png)
+<p align="center">
+  <img src="docs/media/bindr-toast.png" alt="The toast showing the active bindr profile">
+</p>
 
 ## What it does
 
