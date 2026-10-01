@@ -6,18 +6,7 @@ profile in a terminal popup. Profiles contain a `[keys]` table and optional
 plugin command overrides; switching changes only those bindings in Herdr's
 configuration.
 
-![Searching and editing a keybind in bindr](docs/media/search-and-edit.gif)
-
-The GIF shows a search, a manual edit, and the save prompt. The edit is made in
-an isolated demo profile.
-
-**Keybinds popup**
-
-![The bindr keybinds popup with profile tabs, filter field, and bindings](docs/media/keybinds.png)
-
-**Profile switch toast**
-
-![The profile switch toast over the keybinds popup](docs/media/toast.png)
+![The bindr keybinds popup with profile tabs, filter field, and bindings](docs/media/bindr-keybinds.png)
 
 ## What it does
 
