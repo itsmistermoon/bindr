@@ -23,14 +23,17 @@ configuration.
   repeating the plugin shortcut's prefix.
 - Browse profiles without activating them. The active profile and viewed tab
   have separate indicators, and the toast can appear over the keybinds popup.
-- Search commands and shortcuts with `/`. Edit scalar and plugin keybinds with
+- Search commands and shortcuts with `/`. Edit built-in and plugin keybinds with
   `e`, capture a key with `enter`, type one manually with `m`, or unset it with
   `x`. Leaving edit mode asks whether to save or discard changes.
+- Set multiple shortcuts for any action by editing it manually and separating
+  them with a comma and space, for example `ctrl+space, ctrl+s` for `prefix`.
 - See conflicting shortcuts in red, jump between them with `d`, or show only
   duplicates with `f`. Conflicts must be resolved before saving.
 - Create a profile from the viewed one with `shift+n`, rename it with `r`,
   delete it with `shift+d`, and undo the last saved change with `u`. The
-  generated `default` profile is read-only.
+  generated `default` profile is read-only and refreshes when bindr's built-in
+  binding list is updated.
 
 ## Install
 

@@ -1,6 +1,6 @@
 //! Static mirror of Herdr's built-in prefix+? keybinds panel.
 //!
-//! Hand-curated from `herdr --default-config` (herdr 0.8.2) plus screenshots
+//! Hand-curated from `herdr --default-config` (herdr 0.9.3) plus screenshots
 //! of the live panel, because Herdr exposes no API to query its resolved
 //! keymap. This can drift if a future Herdr version changes section layout
 //! or adds/removes bindings -- if it ever disagrees with the real prefix+?
@@ -48,6 +48,7 @@ pub static SECTIONS: &[Section] = &[
                 "prefix+o",
                 "open notification target",
             ),
+            row(Some("remote_image_paste"), "ctrl+v", "remote image paste"),
         ],
     },
     Section {
@@ -59,6 +60,12 @@ pub static SECTIONS: &[Section] = &[
             row(None, "tab / shift+tab", "cycle pane"),
             row(None, "enter", "open workspace"),
             row(None, "1..9", "switch workspace"),
+            row(Some("navigate_workspace_up"), "up", "workspace up"),
+            row(Some("navigate_workspace_down"), "down", "workspace down"),
+            row(Some("navigate_pane_left"), "h", "pane left"),
+            row(Some("navigate_pane_down"), "j", "pane down"),
+            row(Some("navigate_pane_up"), "k", "pane up"),
+            row(Some("navigate_pane_right"), "l", "pane right"),
         ],
     },
     Section {
@@ -100,6 +107,7 @@ pub static SECTIONS: &[Section] = &[
             row(Some("close_pane"), "prefix+x", "close pane"),
             row(Some("rename_pane"), "prefix+shift+p", "rename pane"),
             row(Some("edit_scrollback"), "prefix+e", "edit scrollback"),
+            row(Some("clear_pane"), "", "clear pane"),
             row(None, "prefix+[", "copy mode"),
             row(Some("zoom"), "prefix+z", "zoom pane"),
             row(Some("resize_mode"), "prefix+r", "resize mode"),

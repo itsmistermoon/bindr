@@ -43,7 +43,7 @@ fn snapshot_live() -> Result<toml_edit::DocumentMut> {
         if let Some(id) = command.id
             && displaced.contains_key(&id)
         {
-            keys::Target::Command(id).set(&mut profile, &command.key);
+            keys::Target::Command(id).set_item(&mut profile, command.key);
         }
     }
     Ok(profile)

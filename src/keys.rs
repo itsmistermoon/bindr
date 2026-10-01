@@ -4,14 +4,14 @@
 //!
 //! `[keys]`, `[keys.indexed]`, and `[[keys.command]]` are all, syntactically,
 //! the same top-level "keys" table in TOML's tree; toml_edit lets us touch
-//! only the plain scalar fields (and the `indexed` subtable) while leaving
+//! only built-in bindings (and the `indexed` subtable) while leaving
 //! the `command` array-of-tables node completely alone.
 
 use crate::keybinds_data;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::Path;
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 pub fn load(path: &Path) -> Result<DocumentMut> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
@@ -94,17 +94,13 @@ pub fn apply_plugin_keys(
         else {
             continue;
         };
-        let current = block
-            .get("key")
-            .and_then(Item::as_str)
-            .unwrap_or("")
-            .to_string();
-        match plugin_binding(profile, &id) {
+        let current = block.get("key").cloned().unwrap_or_else(|| value(""));
+        match Target::Command(id.clone()).get_item(profile) {
             Some(binding) => {
                 if displaced.get(&id).is_none() {
-                    displaced[id.as_str()] = value(current);
+                    displaced[id.as_str()] = current;
                 }
-                block["key"] = value(binding);
+                block["key"] = binding;
             }
             None => {
                 if let Some(original) = displaced.remove(&id) {
@@ -146,9 +142,9 @@ pub fn default_profile() -> DocumentMut {
     profile
 }
 
-/// Scalar `[keys]` overrides as (config_key, value), skipping "command" and
-/// any subtables (e.g. `[keys.indexed]`).
-pub fn scalar_overrides(doc: &DocumentMut) -> Vec<(String, String)> {
+/// Displayable `[keys]` overrides as (config_key, value), skipping "command"
+/// and subtables. Herdr accepts a string or string array for each binding.
+pub fn binding_overrides(doc: &DocumentMut) -> Vec<(String, String)> {
     doc.get("keys")
         .and_then(|i| i.as_table())
         .map(|t| {
@@ -157,18 +153,30 @@ pub fn scalar_overrides(doc: &DocumentMut) -> Vec<(String, String)> {
                     if k == "command" {
                         return None;
                     }
-                    v.as_str().map(|s| (k.to_string(), s.to_string()))
+                    binding_text(v).map(|binding| (k.to_string(), binding))
                 })
                 .collect()
         })
         .unwrap_or_default()
 }
 
+pub fn binding_text(item: &Item) -> Option<String> {
+    if let Some(binding) = item.as_str() {
+        return Some(binding.to_string());
+    }
+    let values: Option<Vec<&str>> = item
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str())
+        .collect();
+    values.map(|values| values.join(", "))
+}
+
 /// One `[[keys.command]]` block as shown by the keybinds viewer.
 pub struct CustomCommand {
     /// The block's `command` field, used as its identity in `[plugin_keys]`.
     pub id: Option<String>,
-    pub key: String,
+    pub key: Item,
     pub description: String,
 }
 
@@ -180,7 +188,8 @@ pub fn custom_commands(doc: &DocumentMut) -> Vec<CustomCommand> {
         .map(|aot| {
             aot.iter()
                 .filter_map(|t| {
-                    let key = t.get("key")?.as_str()?.to_string();
+                    let key = t.get("key")?.clone();
+                    binding_text(&key)?;
                     let description = t
                         .get("description")
                         .and_then(|d| d.as_str())
@@ -198,7 +207,7 @@ pub fn custom_commands(doc: &DocumentMut) -> Vec<CustomCommand> {
         .unwrap_or_default()
 }
 
-/// An editable binding: a built-in `[keys]` scalar, or a plugin command
+/// An editable binding: a built-in `[keys]` action, or a plugin command
 /// rebound through the profile's `[plugin_keys]` table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -243,20 +252,29 @@ impl Target {
         self.table(doc).and_then(|t| t.get(self.name())).cloned()
     }
 
-    pub fn get_str(&self, doc: &DocumentMut) -> Option<String> {
-        self.table(doc)
-            .and_then(|t| t.get(self.name()))
-            .and_then(Item::as_str)
-            .map(str::to_string)
-    }
-
     pub fn set_item(&self, doc: &mut DocumentMut, item: Item) {
         let name = self.name().to_string();
         self.table_mut(doc).insert(&name, item);
     }
 
-    pub fn set(&self, doc: &mut DocumentMut, binding: &str) {
+    pub fn set(&self, doc: &mut DocumentMut, binding: &str) -> Result<()> {
+        let shortcuts: Vec<&str> = binding.split(", ").map(str::trim).collect();
+        if matches!(self, Target::Key(name) if name == "prefix") && binding.trim().is_empty() {
+            bail!("prefix must contain one or more nonempty shortcuts");
+        }
+        if shortcuts.len() > 1 {
+            if shortcuts.iter().any(|shortcut| shortcut.is_empty()) {
+                bail!("a shortcut list cannot contain an empty entry");
+            }
+            let mut array = Array::new();
+            for shortcut in shortcuts {
+                array.push(shortcut);
+            }
+            self.set_item(doc, value(array));
+            return Ok(());
+        }
         self.set_item(doc, value(binding));
+        Ok(())
     }
 
     pub fn remove(&self, doc: &mut DocumentMut) {
@@ -269,7 +287,10 @@ impl Target {
 
 /// The profile's binding for a plugin command, if it overrides one.
 pub fn plugin_binding(profile: &DocumentMut, id: &str) -> Option<String> {
-    Target::Command(id.to_string()).get_str(profile)
+    Target::Command(id.to_string())
+        .get_item(profile)
+        .as_ref()
+        .and_then(binding_text)
 }
 
 #[cfg(test)]
@@ -330,7 +351,7 @@ new_tab = "prefix+c"
         let prefix = Target::Key("prefix".to_string());
         let previous = prefix.get_item(&doc);
 
-        prefix.set(&mut doc, "ctrl+a");
+        prefix.set(&mut doc, "ctrl+a").unwrap();
         assert_eq!(doc["keys"]["prefix"].as_str(), Some("ctrl+a"));
         assert_eq!(doc["keys"]["new_tab"].as_str(), Some("prefix+c"));
 
@@ -339,11 +360,50 @@ new_tab = "prefix+c"
     }
 
     #[test]
+    fn shortcut_arrays_round_trip() {
+        let mut doc = document(
+            "[keys]\nprefix = [\"ctrl+space\", \"ctrl+s\"]\nnext_tab = [\"prefix+n\", \"ctrl+alt+right\"]\n",
+        );
+        assert_eq!(
+            binding_overrides(&doc),
+            vec![
+                ("prefix".to_string(), "ctrl+space, ctrl+s".to_string()),
+                (
+                    "next_tab".to_string(),
+                    "prefix+n, ctrl+alt+right".to_string()
+                ),
+            ]
+        );
+        let prefix = Target::Key("prefix".to_string());
+        prefix.set(&mut doc, "ctrl+a, ctrl+b").unwrap();
+        let values: Vec<&str> = doc["keys"]["prefix"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(values, ["ctrl+a", "ctrl+b"]);
+        assert!(prefix.set(&mut doc, "ctrl+a, ").is_err());
+        assert_eq!(doc["keys"]["prefix"].as_array().unwrap().len(), 2);
+        prefix.set(&mut doc, "ctrl+,").unwrap();
+        assert_eq!(doc["keys"]["prefix"].as_str(), Some("ctrl+,"));
+        let next_tab = Target::Key("next_tab".to_string());
+        next_tab.set(&mut doc, "prefix+p, ctrl+alt+left").unwrap();
+        assert_eq!(doc["keys"]["next_tab"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
     fn default_profile_contains_only_neutral_builtin_bindings() {
         let profile = default_profile();
         assert_eq!(profile["keys"]["prefix"].as_str(), Some("ctrl+b"));
         assert_eq!(profile["keys"]["new_tab"].as_str(), Some("prefix+c"));
+        assert_eq!(profile["keys"]["navigate_pane_left"].as_str(), Some("h"));
+        assert_eq!(
+            profile["keys"]["remote_image_paste"].as_str(),
+            Some("ctrl+v")
+        );
         assert!(profile["keys"].get("open_worktree").is_none());
+        assert!(profile["keys"].get("clear_pane").is_none());
         assert!(profile["keys"].get("command").is_none());
     }
 
@@ -409,7 +469,7 @@ prefix = "ctrl+a"
         let mut profile = document("[keys]\nprefix = \"ctrl+b\"\n");
         let target = Target::Command("herdr-bar.open".to_string());
         assert!(target.get_item(&profile).is_none());
-        target.set(&mut profile, "");
+        target.set(&mut profile, "").unwrap();
         assert_eq!(
             plugin_binding(&profile, "herdr-bar.open").as_deref(),
             Some("")
@@ -417,5 +477,59 @@ prefix = "ctrl+a"
         target.remove(&mut profile);
         assert!(plugin_binding(&profile, "herdr-bar.open").is_none());
         assert_eq!(profile["keys"]["prefix"].as_str(), Some("ctrl+b"));
+    }
+
+    #[test]
+    fn plugin_binding_arrays_keep_their_original_type_when_restored() {
+        let mut live = document(
+            "[keys]\n[[keys.command]]\nkey = [\"prefix+a\", \"ctrl+alt+a\"]\ncommand = \"example.open\"\n",
+        );
+        let profile =
+            document("[plugin_keys]\n\"example.open\" = [\"prefix+b\", \"ctrl+alt+b\"]\n");
+        let mut edited = profile.clone();
+        Target::Command("example.open".to_string())
+            .set(&mut edited, "prefix+c, ctrl+alt+c")
+            .unwrap();
+        assert_eq!(
+            edited["plugin_keys"]["example.open"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let mut displaced = DocumentMut::new();
+        assert_eq!(custom_commands(&live).len(), 1);
+        apply_plugin_keys(&mut live, &profile, &mut displaced);
+        assert_eq!(
+            binding_text(
+                live["keys"]["command"]
+                    .as_array_of_tables()
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .get("key")
+                    .unwrap(),
+            )
+            .as_deref(),
+            Some("prefix+b, ctrl+alt+b")
+        );
+        assert_eq!(
+            binding_text(&displaced["example.open"]).as_deref(),
+            Some("prefix+a, ctrl+alt+a")
+        );
+        apply_plugin_keys(&mut live, &document("[plugin_keys]\n"), &mut displaced);
+        assert_eq!(
+            binding_text(
+                live["keys"]["command"]
+                    .as_array_of_tables()
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .get("key")
+                    .unwrap(),
+            )
+            .as_deref(),
+            Some("prefix+a, ctrl+alt+a")
+        );
     }
 }

@@ -74,7 +74,7 @@ fn build_rows(
     displaced: &toml_edit::DocumentMut,
 ) -> Vec<Row> {
     let overrides: HashMap<String, String> =
-        keys::scalar_overrides(profile_doc).into_iter().collect();
+        keys::binding_overrides(profile_doc).into_iter().collect();
     let custom = keys::custom_commands(custom_doc);
 
     let mut rows = Vec::new();
@@ -100,14 +100,10 @@ fn build_rows(
             .id
             .as_deref()
             .and_then(|id| {
-                keys::plugin_binding(profile_doc, id).or_else(|| {
-                    displaced
-                        .get(id)
-                        .and_then(toml_edit::Item::as_str)
-                        .map(str::to_string)
-                })
+                keys::plugin_binding(profile_doc, id)
+                    .or_else(|| displaced.get(id).and_then(keys::binding_text))
             })
-            .unwrap_or(command.key);
+            .unwrap_or_else(|| keys::binding_text(&command.key).unwrap_or_default());
         rows.push(Row::Entry {
             target: command.id.map(Target::Command),
             key: display_value(&key),
@@ -145,7 +141,7 @@ fn duplicate_rows(rows: &[Row]) -> HashSet<usize> {
 /// Map each duplicated row to the other rows sharing its shortcut, so the
 /// editor can name the exact conflict even when the partner is off screen.
 fn duplicate_partners(rows: &[Row]) -> HashMap<usize, Vec<usize>> {
-    let mut occurrences: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut occurrences: HashMap<(bool, String), Vec<usize>> = HashMap::new();
     for (index, row) in rows.iter().enumerate() {
         let Row::Entry { key, .. } = row else {
             continue;
@@ -153,27 +149,37 @@ fn duplicate_partners(rows: &[Row]) -> HashMap<usize, Vec<usize>> {
         if key == "unset" {
             continue;
         }
-        occurrences
-            .entry(key.to_ascii_lowercase())
-            .or_default()
-            .push(index);
+        let bindings = key.split(", ");
+        let in_navigation = row_config_key(row).is_some_and(|key| key.starts_with("navigate_"));
+        for binding in bindings {
+            occurrences
+                .entry((in_navigation, binding.to_ascii_lowercase()))
+                .or_default()
+                .push(index);
+        }
     }
-    occurrences
-        .into_values()
-        .filter(|indices| {
-            indices.len() > 1
-                && indices
-                    .iter()
-                    .any(|&index| row_target(&rows[index]).is_some())
-        })
-        .flat_map(|indices| {
-            indices
+    let mut partners: HashMap<usize, HashSet<usize>> = HashMap::new();
+    for indices in occurrences.into_values() {
+        if indices.len() < 2
+            || !indices
                 .iter()
-                .map(|&index| {
-                    let others = indices.iter().copied().filter(|&o| o != index).collect();
-                    (index, others)
-                })
-                .collect::<Vec<_>>()
+                .any(|&index| row_target(&rows[index]).is_some())
+        {
+            continue;
+        }
+        for &index in &indices {
+            partners
+                .entry(index)
+                .or_default()
+                .extend(indices.iter().copied().filter(|&other| other != index));
+        }
+    }
+    partners
+        .into_iter()
+        .map(|(index, others)| {
+            let mut others: Vec<usize> = others.into_iter().collect();
+            others.sort_unstable();
+            (index, others)
         })
         .collect()
 }
@@ -1539,7 +1545,7 @@ impl ViewState {
             return Ok(());
         };
         let previous = target.get_item(profile);
-        target.set(profile, binding);
+        target.set(profile, binding)?;
         self.staged_undo = Some((target, previous));
         self.saved_row = Some(row);
         self.pending_binding = None;
@@ -1561,7 +1567,7 @@ impl ViewState {
                 keys::load(&path)?
             }
         };
-        let value = keys::scalar_overrides(&profile)
+        let value = keys::binding_overrides(&profile)
             .into_iter()
             .find(|(key, _)| key == config_key)
             .map(|(_, value)| value)
@@ -1731,7 +1737,10 @@ impl ViewState {
             let prefix = self
                 .current_profile_binding(profile_name, "prefix")?
                 .unwrap_or_else(|| "ctrl+b".to_string());
-            if !binding.eq_ignore_ascii_case(&prefix) {
+            if !prefix
+                .split(", ")
+                .any(|value| binding.eq_ignore_ascii_case(value))
+            {
                 self.editing = Some(EditMode::Selecting { row });
                 return Ok(());
             }
@@ -1750,7 +1759,10 @@ impl ViewState {
         let prefix = self
             .current_profile_binding(profile_name, "prefix")?
             .unwrap_or_else(|| "ctrl+b".to_string());
-        if binding.eq_ignore_ascii_case(&prefix) {
+        if prefix
+            .split(", ")
+            .any(|value| binding.eq_ignore_ascii_case(value))
+        {
             self.editing = Some(EditMode::Listening {
                 row,
                 prefix_seen: true,
@@ -2573,6 +2585,42 @@ mod tests {
     }
 
     #[test]
+    fn each_prefix_in_an_array_participates_in_conflict_detection() {
+        let profile: DocumentMut =
+            "[keys]\nprefix = [\"ctrl+space\", \"ctrl+s\"]\nhelp = \"ctrl+s\"\n"
+                .parse()
+                .unwrap();
+        let rows = build_rows(&profile, &profile, &DocumentMut::new());
+        let prefix = rows
+            .iter()
+            .position(|row| row_config_key(row) == Some("prefix"))
+            .unwrap();
+        let help = rows
+            .iter()
+            .position(|row| row_config_key(row) == Some("help"))
+            .unwrap();
+        assert_eq!(duplicate_partners(&rows).get(&prefix), Some(&vec![help]));
+    }
+
+    #[test]
+    fn navigation_shortcuts_do_not_conflict_with_terminal_mode() {
+        let profile: DocumentMut = "[keys]\nnavigate_pane_left = \"h\"\nnew_tab = \"h\"\n"
+            .parse()
+            .unwrap();
+        let rows = build_rows(&profile, &profile, &DocumentMut::new());
+        let navigation = rows
+            .iter()
+            .position(|row| row_config_key(row) == Some("navigate_pane_left"))
+            .unwrap();
+        let new_tab = rows
+            .iter()
+            .position(|row| row_config_key(row) == Some("new_tab"))
+            .unwrap();
+        assert!(!duplicate_partners(&rows).contains_key(&navigation));
+        assert!(!duplicate_partners(&rows).contains_key(&new_tab));
+    }
+
+    #[test]
     fn duplicate_row_text_and_selector_use_ansi_red() {
         let row = Row::Entry {
             target: Some(Target::Key("one".to_string())),
@@ -2614,6 +2662,7 @@ mod tests {
             renaming: None,
             notice: None,
             deleting: None,
+            profile_toast_until: None,
         }
     }
 

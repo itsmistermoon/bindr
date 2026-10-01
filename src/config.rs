@@ -104,18 +104,17 @@ pub fn list_profiles() -> Result<Vec<String>> {
     Ok(profiles.into_iter().map(|(name, _)| name).collect())
 }
 
-/// Ensure the immutable neutral profile exists. It is generated from the
-/// viewer's built-in defaults once and is never overwritten afterwards.
+/// Keep the read-only neutral profile aligned with the built-in defaults.
 pub fn ensure_default_profile() -> Result<()> {
     let dir = profiles_dir();
     fs::create_dir_all(&dir)?;
     let path = dir.join("default.toml");
-    if path.exists() {
-        return Ok(());
-    }
-
     let profile = keys::default_profile();
-    keys::save(&path, &profile)
+    let contents = profile.to_string();
+    if fs::read_to_string(&path).ok().as_deref() != Some(contents.as_str()) {
+        keys::save(&path, &profile)?;
+    }
+    Ok(())
 }
 
 pub fn read_active_profile() -> Option<String> {
