@@ -8,6 +8,10 @@ configuration.
 
 ![The bindr keybinds popup with profile tabs, filter field, and bindings](docs/media/bindr-keybinds.png)
 
+**Profile switch toast**
+
+![The toast showing the active bindr profile](docs/media/bindr-toast.png)
+
 ## What it does
 
 - Cycle profiles in creation order, with `default` always first. Press
