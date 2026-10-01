@@ -12,27 +12,37 @@ use crossterm::{cursor, execute, terminal};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Write, stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use toml_edit::{DocumentMut, Item, value};
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
+const BLUE: &str = "\x1b[94m";
+const BORDER: &str = "\x1b[2;94m";
 const CYAN: &str = "\x1b[36m";
+const GREEN: &str = "\x1b[92m";
+const PILL_GREEN: &str = "\x1b[32m";
+const PURPLE: &str = "\x1b[95m";
 const DIM: &str = "\x1b[2m";
 const BG_CYAN: &str = "\x1b[46m";
-const BG_GREY: &str = "\x1b[100m";
 const BG_GREEN: &str = "\x1b[42m";
+const BG_SAVED: &str = "\x1b[105m";
+const FG_FOCUS_BLUE: &str = "\x1b[38;2;105;163;255m";
+const BG_GREY: &str = "\x1b[100m";
 const FG_BLACK: &str = "\x1b[30m";
 const RED: &str = "\x1b[31m";
+const YELLOW: &str = "\x1b[33m";
 const BG_RED: &str = "\x1b[41m";
 const DEFAULT_PROFILE: &str = "default";
 // Use standard white plus bold instead of bright-white (97) alone. The
 // latter can collapse to the normal foreground in remote/limited-color PTYs.
 const FG_WHITE: &str = "\x1b[1;37m";
+#[cfg(test)]
 const KEY_COL: usize = 30;
 const LEFT_PAD: &str = "  ";
 const PAGE_STEP: usize = 10;
-const TABS_ROW: u16 = 1;
+const TABS_ROW: u16 = 2;
+const SEARCH_INPUT_ROW: u16 = 5;
 
 enum Row {
     Section(String),
@@ -256,17 +266,9 @@ struct FooterHint {
     key: &'static str,
 }
 
-fn footer_segments(
-    naming: bool,
-    searching: bool,
-    editing: bool,
-    listening: bool,
-    manual: bool,
-    prefix_listening: bool,
-    confirming: bool,
-) -> Vec<FooterHint> {
-    if naming {
-        vec![
+fn naming_footer_lines(cols: usize) -> Vec<String> {
+    wrap_footer(
+        &[
             FooterHint {
                 label: "name",
                 key: "a-z/0-9/-/_",
@@ -279,209 +281,302 @@ fn footer_segments(
                 label: "cancel",
                 key: "esc",
             },
-        ]
-    } else if searching {
-        vec![
-            FooterHint {
-                label: "filter",
-                key: "type/backspace",
-            },
-            FooterHint {
-                label: "clear",
-                key: "ctrl+u",
-            },
-            FooterHint {
-                label: "scroll",
-                key: "\u{2191}\u{2193}/pgup/pgdn",
-            },
-            FooterHint {
-                label: "back",
-                key: "esc",
-            },
-        ]
-    } else if confirming {
-        vec![
-            FooterHint {
-                label: "save",
-                key: "y/enter",
-            },
-            FooterHint {
-                label: "discard",
-                key: "n",
-            },
-            FooterHint {
-                label: "back",
-                key: "esc",
-            },
-        ]
-    } else if listening {
-        vec![
-            FooterHint {
-                label: "capture",
-                key: "direct/prefix",
-            },
-            FooterHint {
-                label: "save",
-                key: "enter",
-            },
-            FooterHint {
-                label: "retry",
-                key: "backspace",
-            },
-            FooterHint {
-                label: "cancel",
-                key: if prefix_listening {
-                    "esc/ctrl+c"
-                } else {
-                    "esc"
-                },
-            },
-        ]
-    } else if manual {
-        vec![
-            FooterHint {
-                label: "type",
-                key: "text/backspace",
-            },
-            FooterHint {
-                label: "clear",
-                key: "ctrl+u",
-            },
-            FooterHint {
-                label: "save",
-                key: "enter",
-            },
-            FooterHint {
-                label: "back",
-                key: "esc",
-            },
-        ]
-    } else if editing {
-        vec![
-            FooterHint {
-                label: "select",
-                key: "j/k/\u{2191}\u{2193}",
-            },
-            FooterHint {
-                label: "listen",
-                key: "enter",
-            },
-            FooterHint {
-                label: "manual",
-                key: "m",
-            },
-            FooterHint {
-                label: "unset",
-                key: "x",
-            },
-            FooterHint {
-                label: "next duplicate",
-                key: "d",
-            },
-            FooterHint {
-                label: "duplicates only",
-                key: "f",
-            },
-            FooterHint {
-                label: "scroll",
-                key: "pgup/pgdn",
-            },
-            FooterHint {
-                label: "back",
-                key: "esc",
-            },
-        ]
-    } else {
-        vec![
-            FooterHint {
-                label: "edit",
-                key: "e",
-            },
-            FooterHint {
-                label: "undo",
-                key: "u",
-            },
-            FooterHint {
-                label: "search",
-                key: "/",
-            },
-            FooterHint {
-                label: "tabs",
-                key: "\u{2190}/\u{2192}/click",
-            },
-            FooterHint {
-                label: "scroll",
-                key: "j/k/\u{2191}\u{2193}/pgup/pgdn",
-            },
-            FooterHint {
-                label: "switch active profile",
-                key: "shift+k",
-            },
-            FooterHint {
-                label: "new profile",
-                key: "shift+n",
-            },
-            FooterHint {
-                label: "close",
-                key: "esc/enter/q",
-            },
-        ]
-    }
+        ],
+        cols,
+    )
 }
 
 const FOOTER_SEP: &str = " \u{b7} ";
 
-fn tab_label(name: &str, selected: bool, active: bool) -> String {
-    let marker = if active { "*" } else { "" };
-    if selected {
-        format!("[{marker}{name}]")
-    } else {
-        format!("{marker}{name}")
+fn grouped_footer_lines(groups: &[(&str, &[FooterHint])], cols: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for &(category, hints) in groups {
+        let category_width = category.chars().count() + 1;
+        let available = cols.saturating_sub(category_width);
+        let wrapped = wrap_footer(hints, available);
+        for (index, line) in wrapped.into_iter().enumerate() {
+            if index == 0 {
+                lines.push(format!("{BOLD}{PURPLE}{category}{RESET} {line}"));
+            } else {
+                lines.push(format!("{}{line}", " ".repeat(category_width)));
+            }
+        }
     }
+    lines
+}
+
+fn browse_footer_lines(cols: usize) -> Vec<String> {
+    let groups: [(&str, &[FooterHint]); 3] = [
+        (
+            "NAVIGATION",
+            &[
+                FooterHint {
+                    label: "tabs",
+                    key: "\u{2190}/\u{2192}/click",
+                },
+                FooterHint {
+                    label: "scroll",
+                    key: "j/k/\u{2191}\u{2193}/pgup/pgdn",
+                },
+            ],
+        ),
+        (
+            "PROFILE",
+            &[
+                FooterHint {
+                    label: "switch",
+                    key: "shift+k",
+                },
+                FooterHint {
+                    label: "rename",
+                    key: "r",
+                },
+                FooterHint {
+                    label: "new",
+                    key: "shift+n",
+                },
+                FooterHint {
+                    label: "delete",
+                    key: "shift+d",
+                },
+            ],
+        ),
+        (
+            "ACTIONS",
+            &[
+                FooterHint {
+                    label: "edit",
+                    key: "e",
+                },
+                FooterHint {
+                    label: "undo",
+                    key: "u",
+                },
+                FooterHint {
+                    label: "search",
+                    key: "/",
+                },
+                FooterHint {
+                    label: "close",
+                    key: "esc/enter/q",
+                },
+            ],
+        ),
+    ];
+
+    grouped_footer_lines(&groups, cols)
+}
+
+fn filter_footer_lines(cols: usize) -> Vec<String> {
+    let filter = [
+        FooterHint {
+            label: "filter",
+            key: "type/backspace",
+        },
+        FooterHint {
+            label: "clear",
+            key: "ctrl+u",
+        },
+    ];
+    let navigation = [
+        FooterHint {
+            label: "scroll",
+            key: "\u{2191}\u{2193}/pgup/pgdn",
+        },
+        FooterHint {
+            label: "back",
+            key: "esc",
+        },
+    ];
+    grouped_footer_lines(&[("FILTER", &filter), ("NAVIGATION", &navigation)], cols)
+}
+
+fn rename_footer_lines(cols: usize) -> Vec<String> {
+    let input = [FooterHint {
+        label: "new name",
+        key: "a-z/0-9/-/_",
+    }];
+    let actions = [
+        FooterHint {
+            label: "rename",
+            key: "enter",
+        },
+        FooterHint {
+            label: "cancel",
+            key: "esc",
+        },
+    ];
+    grouped_footer_lines(&[("INPUT", &input), ("ACTIONS", &actions)], cols)
+}
+
+fn delete_footer_lines(cols: usize) -> Vec<String> {
+    let actions = [
+        FooterHint {
+            label: "delete profile",
+            key: "y/enter",
+        },
+        FooterHint {
+            label: "cancel",
+            key: "n/esc",
+        },
+    ];
+    grouped_footer_lines(&[("ACTIONS", &actions)], cols)
+}
+
+fn edit_footer_lines(mode: EditMode, cols: usize, prefix_listening: bool) -> Vec<String> {
+    let navigation = [
+        FooterHint {
+            label: "select",
+            key: "j/k/\u{2191}\u{2193}",
+        },
+        FooterHint {
+            label: "scroll",
+            key: "pgup/pgdn",
+        },
+        FooterHint {
+            label: "back",
+            key: "esc",
+        },
+    ];
+    let binding = [
+        FooterHint {
+            label: "listen",
+            key: "enter",
+        },
+        FooterHint {
+            label: "manual",
+            key: "m",
+        },
+        FooterHint {
+            label: "unset",
+            key: "x",
+        },
+    ];
+    let duplicates = [
+        FooterHint {
+            label: "next duplicate",
+            key: "d",
+        },
+        FooterHint {
+            label: "duplicates only",
+            key: "f",
+        },
+    ];
+    let capture = [
+        FooterHint {
+            label: "capture",
+            key: "direct/prefix",
+        },
+        FooterHint {
+            label: "save",
+            key: "enter",
+        },
+        FooterHint {
+            label: "retry",
+            key: "backspace",
+        },
+        FooterHint {
+            label: "cancel",
+            key: if prefix_listening {
+                "esc/ctrl+c"
+            } else {
+                "esc"
+            },
+        },
+    ];
+    let input = [
+        FooterHint {
+            label: "type",
+            key: "text/backspace",
+        },
+        FooterHint {
+            label: "clear",
+            key: "ctrl+u",
+        },
+    ];
+    let save = [
+        FooterHint {
+            label: "save",
+            key: "y/enter",
+        },
+        FooterHint {
+            label: "discard",
+            key: "n",
+        },
+        FooterHint {
+            label: "back",
+            key: "esc",
+        },
+    ];
+    let manual_actions = [
+        FooterHint {
+            label: "save",
+            key: "enter",
+        },
+        FooterHint {
+            label: "cancel",
+            key: "esc",
+        },
+    ];
+
+    match mode {
+        EditMode::Selecting { .. } => grouped_footer_lines(
+            &[
+                ("NAVIGATION", &navigation),
+                ("BINDING", &binding),
+                ("DUPLICATES", &duplicates),
+            ],
+            cols,
+        ),
+        EditMode::Listening { .. } => grouped_footer_lines(&[("CAPTURE", &capture)], cols),
+        EditMode::Manual { .. } => {
+            grouped_footer_lines(&[("INPUT", &input), ("ACTIONS", &manual_actions)], cols)
+        }
+        EditMode::Confirming { .. } => grouped_footer_lines(&[("SAVE", &save)], cols),
+    }
+}
+
+fn tab_width(name: &str) -> usize {
+    name.chars().count() + 6
 }
 
 fn styled_tab(name: &str, selected: bool, active: bool) -> String {
-    let label = tab_label(name, selected, active);
     if selected {
-        format!("{BOLD}{BG_CYAN}{FG_BLACK}{label}{RESET}")
+        format!("{PILL_GREEN}{BG_GREEN}{FG_BLACK}{BOLD} [{name}] {RESET}{PILL_GREEN}{RESET}")
     } else if active {
-        format!("{BOLD}{CYAN}{label}{RESET}")
+        format!("{BOLD}{GREEN}   {name}   {RESET}")
     } else {
-        format!("{DIM}{label}{RESET}")
+        format!("{DIM}   {name}   {RESET}")
     }
 }
 
-/// Return the inclusive-exclusive range of tabs that fits on the single tab
-/// row. The selected tab is always kept visible when the list is too wide.
-fn visible_tab_range(
-    profiles: &[String],
-    viewed: Option<&str>,
-    active: &str,
-    cols: usize,
-) -> (usize, usize) {
-    if profiles.is_empty() {
-        return (0, 0);
+/// Keep the first tab pinned and return the visible range of the remaining
+/// tabs. The viewed profile stays visible when the strip overflows.
+fn visible_tab_range(profiles: &[String], viewed: Option<&str>, cols: usize) -> (usize, usize) {
+    if profiles.len() <= 1 {
+        return (1, 1);
     }
 
     let selected = viewed
         .and_then(|name| profiles.iter().position(|profile| profile == name))
         .unwrap_or(0);
     let budget = cols.saturating_sub(LEFT_PAD.chars().count());
-    let mut start = 0;
+    let mut start = 1;
     let mut end = profiles.len();
 
     let strip_width = |start: usize, end: usize| {
+        let pinned_width = tab_width(&profiles[0]);
+        if start == end {
+            return pinned_width + 2;
+        }
         let tabs_width: usize = profiles[start..end]
             .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                let selected = start + i == selected;
-                tab_label(name, selected, name == active).chars().count()
-            })
+            .map(|name| tab_width(name))
             .sum();
-        let separators = end.saturating_sub(start + 1);
-        let edge_markers = usize::from(start > 0) * 2 + usize::from(end < profiles.len()) * 2;
-        tabs_width + separators + edge_markers
+        let separators = end - start - 1;
+        let leading = if start > 1 { 3 } else { 1 };
+        let trailing = if end < profiles.len() { 2 } else { 0 };
+        pinned_width + leading + tabs_width + separators + trailing
     };
 
     while strip_width(start, end) > budget && (start < selected || end > selected + 1) {
@@ -498,20 +593,23 @@ fn visible_tab_range(
 fn tab_at_column(
     profiles: &[String],
     viewed: Option<&str>,
-    active: &str,
     cols: usize,
     column: u16,
 ) -> Option<usize> {
-    let (start, end) = visible_tab_range(profiles, viewed, active, cols);
-    let selected = viewed
-        .and_then(|name| profiles.iter().position(|profile| profile == name))
-        .unwrap_or(0);
-    let mut x = LEFT_PAD.chars().count() + usize::from(start > 0) * 2;
+    let pinned = profiles.first()?;
+    let mut x = LEFT_PAD.chars().count();
+    let pinned_width = tab_width(pinned);
+    if usize::from(column) >= x && usize::from(column) < x + pinned_width {
+        return Some(0);
+    }
+    let (start, end) = visible_tab_range(profiles, viewed, cols);
+    if start == end {
+        return None;
+    }
+    x += pinned_width + if start > 1 { 3 } else { 1 };
     for (i, name) in profiles[start..end].iter().enumerate() {
         let index = start + i;
-        let width = tab_label(name, index == selected, name == active)
-            .chars()
-            .count();
+        let width = tab_width(name);
         if usize::from(column) >= x && usize::from(column) < x + width {
             return Some(index);
         }
@@ -531,11 +629,19 @@ fn render_tabs(profiles: &[String], viewed: Option<&str>, active: &str, cols: us
     let selected = viewed
         .and_then(|name| profiles.iter().position(|profile| profile == name))
         .unwrap_or(0);
-    let (start, end) = visible_tab_range(profiles, viewed, active, cols);
+    let (start, end) = visible_tab_range(profiles, viewed, cols);
 
-    let mut line = String::new();
-    if start > 0 {
-        line.push_str(&format!("{DIM}\u{2026} {RESET}"));
+    let mut line = styled_tab(&profiles[0], selected == 0, profiles[0] == active);
+    if start == end {
+        if profiles.len() > 1 {
+            line.push_str(&format!(" {DIM}\u{2026}{RESET}"));
+        }
+        return line;
+    }
+    if start > 1 {
+        line.push_str(&format!(" {DIM}\u{2026}{RESET} "));
+    } else {
+        line.push(' ');
     }
     for (i, name) in profiles[start..end].iter().enumerate() {
         if i > 0 {
@@ -667,6 +773,14 @@ fn key_event_binding(key: &KeyEvent) -> Option<String> {
     Some(parts.join("+"))
 }
 
+/// Crossterm terminals may report a shifted letter as either an uppercase
+/// character or a lowercase character with the SHIFT modifier set.
+fn shifted_char(key: &KeyEvent, uppercase: char) -> bool {
+    key.code == KeyCode::Char(uppercase)
+        || (key.code == KeyCode::Char(uppercase.to_ascii_lowercase())
+            && key.modifiers.contains(KeyModifiers::SHIFT))
+}
+
 fn default_binding(config_key: &str) -> Option<&'static str> {
     keybinds_data::SECTIONS
         .iter()
@@ -677,9 +791,11 @@ fn default_binding(config_key: &str) -> Option<&'static str> {
 
 struct UndoEntry {
     profile_name: String,
+    renamed_to: Option<String>,
     profile_previous: DocumentMut,
     live_previous: Option<DocumentMut>,
     active_profile: String,
+    active_profile_after: String,
 }
 
 fn save_undo(undo: &UndoEntry) -> Result<()> {
@@ -689,7 +805,9 @@ fn save_undo(undo: &UndoEntry) -> Result<()> {
     }
     let mut doc = DocumentMut::new();
     doc["profile"] = value(&undo.profile_name);
+    doc["renamed_to"] = value(undo.renamed_to.as_deref().unwrap_or_default());
     doc["active_profile"] = value(&undo.active_profile);
+    doc["active_profile_after"] = value(&undo.active_profile_after);
     doc["profile_previous"] = value(undo.profile_previous.to_string());
     doc["live_previous_present"] = value(undo.live_previous.is_some());
     if let Some(item) = &undo.live_previous {
@@ -726,9 +844,14 @@ fn load_undo() -> Result<Option<UndoEntry>> {
         .transpose()?;
     Ok(Some(UndoEntry {
         profile_name: required("profile")?.to_string(),
+        renamed_to: match required("renamed_to")? {
+            "" => None,
+            name => Some(name.to_string()),
+        },
         profile_previous: document("profile_previous")?,
         live_previous,
         active_profile: required("active_profile")?.to_string(),
+        active_profile_after: required("active_profile_after")?.to_string(),
     }))
 }
 
@@ -761,20 +884,32 @@ fn commit_profile(
     };
     Ok(UndoEntry {
         profile_name: profile_name.to_string(),
+        renamed_to: None,
         profile_previous,
         live_previous,
         active_profile: active_profile.to_string(),
+        active_profile_after: active_profile.to_string(),
     })
 }
 
 fn restore_profile(undo: &UndoEntry, active_profile: &str) -> Result<()> {
+    if let Some(renamed_to) = &undo.renamed_to {
+        let renamed_path = config::profiles_dir().join(format!("{renamed_to}.toml"));
+        let original_path = config::profiles_dir().join(format!("{}.toml", undo.profile_name));
+        fs::rename(&renamed_path, &original_path).context("restoring renamed profile")?;
+        if active_profile == renamed_to {
+            config::write_active_profile(&undo.profile_name)?;
+        }
+        return Ok(());
+    }
     let profile_path = config::profiles_dir().join(format!("{}.toml", undo.profile_name));
     keys::save(&profile_path, &undo.profile_previous)?;
 
-    if undo.profile_name == active_profile && undo.active_profile == active_profile {
+    if undo.live_previous.is_some() && undo.active_profile_after == active_profile {
         let config_path = config::config_path();
         if let Some(live_previous) = &undo.live_previous {
             keys::save(&config_path, live_previous)?;
+            config::write_active_profile(&undo.active_profile)?;
             switch::reload_config()?;
         }
     }
@@ -783,23 +918,39 @@ fn restore_profile(undo: &UndoEntry, active_profile: &str) -> Result<()> {
 
 /// `conflict` carries the labels of the rows sharing this shortcut; it is shown
 /// after the description so the partner is known without scrolling to it.
+#[cfg(test)]
 fn render_row(
     row: &Row,
     width: usize,
     highlight: Option<RowHighlight>,
     conflict: Option<&str>,
 ) -> String {
+    render_row_with_key_width(row, width, KEY_COL, highlight, conflict)
+}
+
+fn render_row_with_key_width(
+    row: &Row,
+    width: usize,
+    key_width: usize,
+    highlight: Option<RowHighlight>,
+    conflict: Option<&str>,
+) -> String {
     match row {
         Row::Blank => String::new(),
-        Row::Section(name) => format!("{LEFT_PAD}{BOLD}{CYAN}{name}{RESET}"),
+        Row::Section(name) => format!(
+            "{LEFT_PAD}{BOLD}{PURPLE}{}{RESET}",
+            fit_line(name, width.saturating_sub(LEFT_PAD.len()))
+        ),
         Row::Entry {
             key, description, ..
         } => {
+            let key_width = key_width.min(width.saturating_sub(LEFT_PAD.len() + 4));
+            let key = fit_line(key, key_width);
             let description = &match conflict {
                 Some(note) => format!("{description} \u{26a0} {note}"),
                 None => description.clone(),
             };
-            let desc_width = (width.saturating_sub(LEFT_PAD.len() + KEY_COL)).max(4);
+            let desc_width = (width.saturating_sub(LEFT_PAD.len() + key_width + 1)).max(4);
             let desc = if description.chars().count() > desc_width {
                 let mut cut: String = description
                     .chars()
@@ -815,19 +966,23 @@ fn render_row(
                 description.clone()
             };
             if let Some(highlight) = highlight {
-                let (background, foreground) = match highlight {
-                    RowHighlight::Editing => (BG_CYAN, FG_BLACK),
-                    RowHighlight::Listening => (BG_GREY, FG_WHITE),
-                    RowHighlight::Saved => (BG_GREEN, FG_BLACK),
-                    RowHighlight::Conflict => (BG_RED, FG_WHITE),
-                };
-                format!(
-                    "{background}{foreground}{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{background}{foreground}{desc}{RESET}"
-                )
+                if matches!(highlight, RowHighlight::Editing) {
+                    format!(
+                        "{LEFT_PAD}{BOLD}{FG_FOCUS_BLUE}{key:<key_width$}\x1b[22m\x1b[39m {desc}"
+                    )
+                } else if matches!(highlight, RowHighlight::Saved) {
+                    format!("{LEFT_PAD}{BOLD}{FG_BLACK}{key:<key_width$}\x1b[22m {desc}")
+                } else if matches!(highlight, RowHighlight::Listening) {
+                    format!("{LEFT_PAD}{FG_WHITE}{key:<key_width$}\x1b[22m\x1b[39m {desc}")
+                } else {
+                    format!(
+                        "{BG_RED}{FG_WHITE}{LEFT_PAD}{BOLD}{key:<key_width$}{RESET}{BG_RED}{FG_WHITE} {desc}{RESET}"
+                    )
+                }
             } else if conflict.is_some() {
-                format!("{RED}{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{RED}{desc}{RESET}")
+                format!("{RED}{LEFT_PAD}{BOLD}{key:<key_width$}{RESET}{RED} {desc}{RESET}")
             } else {
-                format!("{LEFT_PAD}{BOLD}{key:<KEY_COL$}{RESET}{desc}")
+                format!("{LEFT_PAD}{BOLD}{FG_WHITE}{key:<key_width$}{RESET} {desc}")
             }
         }
     }
@@ -857,8 +1012,14 @@ struct ViewState {
     duplicates_only: bool,
     /// Name being typed for a new profile (shift+N), if any.
     naming: Option<String>,
+    /// New name being entered for the viewed profile.
+    renaming: Option<String>,
     /// One-shot message for the hint line, cleared on the next key.
     notice: Option<String>,
+    /// Profile awaiting deletion confirmation (shift+D).
+    deleting: Option<String>,
+    /// Brief in-view toast shown after switching the active profile.
+    profile_toast_until: Option<Instant>,
 }
 
 impl ViewState {
@@ -903,7 +1064,10 @@ impl ViewState {
             staged_undo: None,
             duplicates_only: false,
             naming: None,
+            renaming: None,
             notice: None,
+            deleting: None,
+            profile_toast_until: None,
         })
     }
 
@@ -1037,6 +1201,7 @@ impl ViewState {
         if switch::switch_to_next().is_ok() {
             self.active_profile = config::read_active_profile().unwrap_or_else(|| "?".to_string());
             self.profiles = config::list_profiles()?;
+            self.profile_toast_until = Some(Instant::now() + Duration::from_secs(2));
         }
         Ok(())
     }
@@ -1083,12 +1248,11 @@ impl ViewState {
             return;
         };
         let (cols, term_rows) = terminal::size().unwrap_or((76, 22));
-        let footer_lines = wrap_footer(
-            &footer_segments(false, false, true, false, false, false, false),
-            cols as usize,
-        )
-        .len();
-        let viewport = (term_rows as usize).saturating_sub(6 + footer_lines).max(1);
+        let footer_lines =
+            edit_footer_lines(EditMode::Selecting { row }, cols as usize, false).len();
+        let viewport = (term_rows as usize)
+            .saturating_sub(10 + footer_lines)
+            .max(1);
         if position < self.offset {
             self.offset = position;
         } else if position >= self.offset + viewport {
@@ -1155,7 +1319,10 @@ impl ViewState {
             self.notice = Some(error);
             return Ok(());
         }
-        let base = self.viewed_profile.clone().unwrap_or_else(|| DEFAULT_PROFILE.to_string());
+        let base = self
+            .viewed_profile
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PROFILE.to_string());
         let dir = config::profiles_dir();
         let profile = keys::load(&dir.join(format!("{base}.toml")))?;
         keys::save(&dir.join(format!("{name}.toml")), &profile)?;
@@ -1163,6 +1330,167 @@ impl ViewState {
         self.profiles = config::list_profiles()?;
         self.viewed_profile = Some(name.clone());
         self.notice = Some(format!("created '{name}' from '{base}'; press e to edit"));
+        self.reload_viewed()
+    }
+
+    fn request_rename_profile(&mut self) {
+        if self.has_pending_changes() {
+            self.notice = Some("save or discard keybind edits before renaming this profile".into());
+            return;
+        }
+        if self.editing.is_some() {
+            self.discard_edit();
+        }
+        match self.viewed_profile.as_deref() {
+            Some(DEFAULT_PROFILE) => {
+                self.notice = Some("the default profile cannot be renamed".to_string());
+            }
+            Some(_) => self.renaming = Some(String::new()),
+            None => {}
+        }
+    }
+
+    fn rename_profile(&mut self) -> Result<()> {
+        let Some(new_name) = self.renaming.clone() else {
+            return Ok(());
+        };
+        let Some(old_name) = self.viewed_profile.clone() else {
+            self.renaming = None;
+            return Ok(());
+        };
+        if !save::valid_name(&new_name) {
+            self.renaming = None;
+            self.notice = Some("use only letters, digits, - and _".to_string());
+            return Ok(());
+        }
+        if new_name == old_name {
+            self.renaming = None;
+            self.notice = Some(format!("'{old_name}' is already named that"));
+            return Ok(());
+        }
+        if self.profiles.contains(&new_name) {
+            self.renaming = None;
+            self.notice = Some(format!("profile '{new_name}' already exists"));
+            return Ok(());
+        }
+
+        let profiles_dir = config::profiles_dir();
+        let old_path = profiles_dir.join(format!("{old_name}.toml"));
+        let new_path = profiles_dir.join(format!("{new_name}.toml"));
+        if new_path.exists() {
+            self.renaming = None;
+            self.notice = Some(format!("profile '{new_name}' already exists"));
+            return Ok(());
+        }
+        fs::rename(&old_path, &new_path).context("renaming profile")?;
+        let was_active = self.active_profile == old_name;
+        if was_active {
+            if let Err(error) = config::write_active_profile(&new_name) {
+                fs::rename(&new_path, &old_path).context("rolling back profile rename")?;
+                return Err(error);
+            }
+            self.active_profile = new_name.clone();
+        }
+
+        let undo = UndoEntry {
+            profile_name: old_name.clone(),
+            renamed_to: Some(new_name.clone()),
+            profile_previous: keys::load(&new_path)?,
+            live_previous: None,
+            active_profile: if was_active {
+                old_name.clone()
+            } else {
+                self.active_profile.clone()
+            },
+            active_profile_after: self.active_profile.clone(),
+        };
+        save_undo(&undo)?;
+        self.last_undo = Some(undo);
+        self.renaming = None;
+        self.profiles = config::list_profiles()?;
+        self.viewed_profile = Some(new_name.clone());
+        self.notice = Some(format!(
+            "renamed '{old_name}' to '{new_name}'; press u to undo"
+        ));
+        self.reload_viewed()
+    }
+
+    fn request_delete_profile(&mut self) {
+        if self.has_pending_changes() {
+            self.notice = Some("save or discard keybind edits before deleting this profile".into());
+            return;
+        }
+        if self.editing.is_some() {
+            self.discard_edit();
+        }
+        self.searching = false;
+        self.query.clear();
+        self.refilter();
+        match self.viewed_profile.as_deref() {
+            Some(DEFAULT_PROFILE) => {
+                self.notice = Some("the default profile cannot be deleted".to_string());
+            }
+            Some(name) => self.deleting = Some(name.to_string()),
+            None => {}
+        }
+    }
+
+    /// Delete the profile confirmed in `deleting`. Deleting the active profile
+    /// switches Herdr to the protected default profile first.
+    fn delete_profile(&mut self) -> Result<()> {
+        let Some(name) = self.deleting.clone() else {
+            return Ok(());
+        };
+        self.deleting = None;
+        if name == DEFAULT_PROFILE {
+            self.notice = Some("the default profile cannot be deleted".to_string());
+            return Ok(());
+        }
+
+        let profile_path = config::profiles_dir().join(format!("{name}.toml"));
+        let profile_previous = keys::load(&profile_path)?;
+        let was_active = self.active_profile == name;
+        fs::remove_file(&profile_path).context("deleting profile")?;
+        let live_previous = if was_active {
+            let default =
+                keys::load(&config::profiles_dir().join(format!("{DEFAULT_PROFILE}.toml")))?;
+            Some(switch::apply_to_config(&default)?)
+        } else {
+            None
+        };
+        if was_active {
+            self.active_profile = DEFAULT_PROFILE.to_string();
+            config::write_active_profile(DEFAULT_PROFILE)?;
+            switch::reload_config()?;
+        }
+
+        let active_profile_after = self.active_profile.clone();
+        let undo = UndoEntry {
+            profile_name: name.clone(),
+            renamed_to: None,
+            profile_previous,
+            live_previous,
+            active_profile: if was_active {
+                name.clone()
+            } else {
+                self.active_profile.clone()
+            },
+            active_profile_after,
+        };
+        save_undo(&undo)?;
+        self.last_undo = Some(undo);
+        let previous_index = self
+            .viewed_profile
+            .as_deref()
+            .and_then(|viewed| self.profiles.iter().position(|profile| profile == viewed))
+            .unwrap_or(0);
+        self.profiles = config::list_profiles()?;
+        if was_active {
+            self.viewed_profile = Some(DEFAULT_PROFILE.to_string());
+        } else {
+            self.viewed_profile = self.profiles.get(previous_index).cloned();
+        }
+        self.notice = Some(format!("deleted '{name}'; press u to undo"));
         self.reload_viewed()
     }
 
@@ -1330,6 +1658,8 @@ impl ViewState {
         self.saved_row = None;
         self.pending_binding = None;
         self.manual_binding.clear();
+        self.active_profile = config::read_active_profile().unwrap_or_else(|| "?".to_string());
+        self.profiles = config::list_profiles()?;
         self.reload_viewed()?;
         Ok(())
     }
@@ -1432,9 +1762,8 @@ impl ViewState {
     }
 }
 
-/// Truncate `text` to `width` columns with an ellipsis. The hint line must never
-/// wrap: an extra line would push the output past the popup height and scroll
-/// the banner off screen.
+/// Truncate `text` to `width` columns with an ellipsis when it must stay on one
+/// line, such as while typing a profile name or key binding.
 fn fit_line(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         return text.to_string();
@@ -1442,6 +1771,33 @@ fn fit_line(text: &str, width: usize) -> String {
     let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
     cut.push('\u{2026}');
     cut
+}
+
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let word = if word.chars().count() > width {
+            fit_line(word, width)
+        } else {
+            word.to_string()
+        };
+        let extra = usize::from(!line.is_empty());
+        if !line.is_empty() && line.chars().count() + extra + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(&word);
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Rows sharing the shortcut of the row selected in edit mode, if any.
@@ -1452,39 +1808,165 @@ fn selected_conflict(state: &ViewState) -> Option<Vec<usize>> {
     duplicate_partners(&state.rows).remove(&row)
 }
 
+fn ansi_width(text: &str) -> usize {
+    let mut width = 0;
+    let mut escape = false;
+    for ch in text.chars() {
+        if escape {
+            if ch == 'm' {
+                escape = false;
+            }
+        } else if ch == '\u{1b}' {
+            escape = true;
+        } else {
+            width += 1;
+        }
+    }
+    width
+}
+
+fn pad_ansi(text: &str, width: usize) -> String {
+    let visible = ansi_width(text);
+    format!("{text}{}", " ".repeat(width.saturating_sub(visible)))
+}
+
+fn fit_ansi_line(text: &str, width: usize) -> String {
+    if ansi_width(text) <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut visible = 0;
+    let mut escape = false;
+    for ch in text.chars() {
+        if ch == '\u{1b}' {
+            escape = true;
+        } else if escape {
+            if ch == 'm' {
+                escape = false;
+            }
+        } else {
+            if visible == width - 1 {
+                break;
+            }
+            visible += 1;
+        }
+        result.push(ch);
+    }
+    result.push('\u{2026}');
+    result.push_str(RESET);
+    result
+}
+
+fn panel_rule(cols: usize, left: char, right: char) -> String {
+    let fill = "─".repeat(cols.saturating_sub(2));
+    format!("{BORDER}{left}{fill}{right}{RESET}")
+}
+
+fn panel_title_rule(cols: usize, title: &str) -> String {
+    let title = format!(" {title} ");
+    let leading = 2.min(cols.saturating_sub(2 + title.len()));
+    let trailing = cols.saturating_sub(2 + leading + title.len());
+    format!(
+        "{BORDER}╭{}{RESET}{BOLD}{PURPLE}{title}{RESET}{BORDER}{}╮{RESET}",
+        "─".repeat(leading),
+        "─".repeat(trailing),
+    )
+}
+
+fn panel_line(text: &str, cols: usize, background: Option<&str>) -> String {
+    let inner_width = cols.saturating_sub(4);
+    let padded = pad_ansi(text, inner_width);
+    match background {
+        Some(background) => {
+            format!("{BORDER}│{RESET}{background} {padded} {RESET}{BORDER}│{RESET}")
+        }
+        None => format!("{BORDER}│{RESET} {padded} {BORDER}│{RESET}"),
+    }
+}
+
+fn text_field(
+    cols: usize,
+    title: &str,
+    value: &str,
+    placeholder: Option<&str>,
+    focused: bool,
+) -> String {
+    let top = panel_title_rule(cols, title);
+
+    let max_query = cols.saturating_sub(8 + usize::from(focused));
+    let visible_value: String = value
+        .chars()
+        .rev()
+        .take(max_query)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let content = if value.is_empty() && !focused {
+        format!(
+            "{DIM}{}{RESET}",
+            fit_ansi_line(placeholder.unwrap_or(""), cols.saturating_sub(8))
+        )
+    } else if focused {
+        format!("{visible_value}{YELLOW}\u{2588}{RESET}")
+    } else {
+        visible_value
+    };
+    let input = panel_line(&format!("{CYAN}>{RESET} {content}"), cols, None);
+    format!("{top}\r\n{input}\r\n{}\r\n", panel_rule(cols, '╰', '╯'))
+}
+
+fn search_field(cols: usize, query: &str, focused: bool) -> String {
+    let placeholder =
+        format!("press {RESET}{FG_WHITE}/{RESET}{DIM} to filter by command or shortcut");
+    text_field(cols, "filter", query, Some(&placeholder), focused)
+}
+
+fn instruction_field(cols: usize, title: &str, hint: &str) -> String {
+    let hint = fit_ansi_line(hint, cols.saturating_sub(8));
+    let content = panel_line(&format!("{CYAN}>{RESET} {DIM}{hint}{RESET}"), cols, None);
+    format!(
+        "{}\r\n{content}\r\n{}\r\n",
+        panel_title_rule(cols, title),
+        panel_rule(cols, '╰', '╯')
+    )
+}
+
 fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     let (cols, term_rows) = terminal::size()?;
     let cols = cols as usize;
 
-    let listening = matches!(state.editing, Some(EditMode::Listening { .. }));
-    let manual = matches!(state.editing, Some(EditMode::Manual { .. }));
     let confirming = matches!(state.editing, Some(EditMode::Confirming { .. }));
     let prefix_listening = match state.editing {
         Some(EditMode::Listening { row, .. }) => row_config_key(&state.rows[row]) == Some("prefix"),
         _ => false,
     };
-    let footer_lines = wrap_footer(
-        &footer_segments(
-            state.naming.is_some(),
-            state.searching,
-            state.editing.is_some(),
-            listening,
-            manual,
-            prefix_listening,
-            confirming,
-        ),
-        cols,
-    );
-    // Fixed chrome: banner, tabs + blank, search/hint line + blank, trailing
-    // blank, then the footer (which may itself wrap onto more than one line).
-    let viewport = (term_rows as usize)
-        .saturating_sub(6 + footer_lines.len())
-        .max(1);
-    let max_offset = state.filtered.len().saturating_sub(viewport);
-    state.offset = state.offset.min(max_offset);
+    let browsing = state.editing.is_none()
+        && !state.searching
+        && state.naming.is_none()
+        && state.renaming.is_none()
+        && state.deleting.is_none();
+    let show_search_field = state.searching || (browsing && state.notice.is_none());
+    let footer_lines = if browsing {
+        browse_footer_lines(cols)
+    } else if state.searching {
+        filter_footer_lines(cols)
+    } else if let Some(mode) = state.editing {
+        edit_footer_lines(mode, cols, prefix_listening)
+    } else if state.renaming.is_some() {
+        rename_footer_lines(cols)
+    } else if state.deleting.is_some() {
+        delete_footer_lines(cols)
+    } else {
+        naming_footer_lines(cols)
+    };
+    let inner_width = cols.saturating_sub(4);
 
     let banner = format!(" active profile: {} ", state.active_profile);
-    let pad = cols.saturating_sub(banner.chars().count()) / 2;
+    let pad = cols.saturating_sub(banner.chars().count() + 2) / 2;
 
     let mut buf = String::new();
     let tabs = render_tabs(
@@ -1497,79 +1979,130 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     buf.push_str("\x1b[2J\x1b[H");
     buf.push_str(&" ".repeat(pad));
     buf.push_str(&format!(
-        "{BOLD}{BG_CYAN}{FG_BLACK}{banner}{RESET}\x1b[K\r\n"
+        "{CYAN}{BG_CYAN}{FG_BLACK}{BOLD}{banner}{RESET}{CYAN}{RESET}\x1b[K\r\n"
     ));
+    buf.push_str("\x1b[K\r\n");
     buf.push_str(LEFT_PAD);
     buf.push_str(&tabs);
-    buf.push_str("\x1b[K\r\n\r\n");
-    if let Some(name) = &state.naming {
+    buf.push_str("\x1b[K\r\n");
+    let readonly_notice = browsing
+        && state.notice.is_none()
+        && state.viewed_profile.as_deref() == Some(DEFAULT_PROFILE);
+    if readonly_notice {
+        buf.push_str(&format!(
+            "{LEFT_PAD}{DIM}default profile is read-only{RESET}\x1b[K\r\n"
+        ));
+    } else {
+        buf.push_str("\r\n");
+    }
+    let mut extra_status_lines = 0;
+    if show_search_field {
+        buf.push_str(&search_field(cols, &state.query, state.searching));
+        extra_status_lines = 1;
+    } else if matches!(state.editing, Some(EditMode::Manual { .. })) {
+        buf.push_str(&text_field(
+            cols,
+            "input",
+            &state.manual_binding,
+            None,
+            true,
+        ));
+        extra_status_lines = 1;
+    } else if let Some(EditMode::Listening { prefix_seen, .. }) = state.editing {
+        let value =
+            state
+                .pending_binding
+                .as_deref()
+                .unwrap_or(if prefix_seen { "prefix+" } else { "" });
+        buf.push_str(&text_field(
+            cols,
+            "capture",
+            value,
+            None,
+            state.pending_binding.is_none(),
+        ));
+        extra_status_lines = 1;
+    } else if let Some(name) = &state.naming {
         let base = state.viewed_profile.as_deref().unwrap_or(DEFAULT_PROFILE);
         buf.push_str(&format!(
             "{LEFT_PAD}{BOLD}new profile from {base}:{RESET} {name}\u{2588}\x1b[K\r\n\r\n",
         ));
-    } else if state.searching {
-        buf.push_str(&format!(
-            "{LEFT_PAD}{BOLD}/{RESET}{}\u{2588}\x1b[K\r\n\r\n",
-            state.query
-        ));
+    } else if let Some(name) = &state.renaming {
+        buf.push_str(&text_field(cols, "rename profile", name, None, true));
+        extra_status_lines = 1;
+    } else if let Some(name) = state.deleting.as_deref() {
+        let key = |binding: &str| format!("{RESET}{FG_WHITE}{binding}{RESET}{DIM}");
+        let hint = format!(
+            "delete '{name}'? {} confirm · {} cancel",
+            key("y/enter"),
+            key("n/esc")
+        );
+        buf.push_str(&instruction_field(cols, "delete profile", &hint));
+        extra_status_lines = 1;
     } else if let Some(editing) = state.editing {
+        let key = |binding: &str| format!("{RESET}{FG_WHITE}{binding}{RESET}{DIM}");
         let hint = if confirming && state.has_unresolved_duplicates() {
-            "resolve red duplicates to save; n discard; esc back".to_string()
+            format!(
+                "resolve red duplicates to save; {} discard; {} back",
+                key("n"),
+                key("esc")
+            )
         } else if confirming {
-            "save changes to this keybind profile? y/enter yes; n discard; esc back".to_string()
-        } else if let Some(binding) = state.pending_binding.as_deref() {
-            format!("captured {binding}; enter save; backspace retry; esc cancel")
+            format!(
+                "save changes? {} yes; {} discard; {} back",
+                key("y/enter"),
+                key("n"),
+                key("esc")
+            )
         } else if let Some(others) = selected_conflict(state) {
             format!(
-                "also used by {}; d next duplicate; f duplicates only",
-                conflict_note(&state.rows, &others)
+                "also used by {}; {} next duplicate; {} duplicates only",
+                conflict_note(&state.rows, &others),
+                key("d"),
+                key("f")
             )
         } else if state.has_unresolved_duplicates() {
-            "duplicates are red; resolve them to save, or esc to discard".to_string()
+            format!(
+                "duplicates are red; resolve them to save, or {} to discard",
+                key("esc")
+            )
         } else {
             match editing {
-                EditMode::Selecting { .. } => {
-                    "press enter to listen; m for manual text; esc to leave edit mode".to_string()
-                }
-                EditMode::Manual { .. } => format!(
-                    "binding: {}\u{2588}; ctrl+u clear; enter save; esc cancel",
-                    state.manual_binding
+                EditMode::Selecting { .. } => format!(
+                    "{} listen · {} manual text · {} leave edit mode",
+                    key("enter"),
+                    key("m"),
+                    key("esc")
                 ),
-                EditMode::Listening { row, .. }
-                    if row_config_key(&state.rows[row]) == Some("prefix") =>
-                {
-                    "press the new prefix; ctrl+c to cancel".to_string()
-                }
-                EditMode::Listening {
-                    prefix_seen: true, ..
-                } => "prefix detected; press the next key; esc to cancel".to_string(),
-                EditMode::Listening { .. } => {
-                    "press direct key or this profile's prefix + key; terminal/Herdr may use it"
-                        .to_string()
-                }
-                EditMode::Confirming { .. } => unreachable!(),
+                EditMode::Manual { .. }
+                | EditMode::Listening { .. }
+                | EditMode::Confirming { .. } => unreachable!(),
             }
         };
-        buf.push_str(&format!(
-            "{LEFT_PAD}{DIM}{}{RESET}\x1b[K\r\n\r\n",
-            fit_line(&hint, cols.saturating_sub(LEFT_PAD.len()))
-        ));
+        let title = if confirming { "save" } else { "edit" };
+        buf.push_str(&instruction_field(cols, title, &hint));
+        extra_status_lines = 1;
     } else {
         let hint = if let Some(notice) = &state.notice {
             notice.as_str()
-        } else if state.viewed_profile.as_deref() == Some(DEFAULT_PROFILE) {
-            "default profile is read-only; press / to filter by command or shortcut"
         } else {
             "press / to filter by command or shortcut"
         };
-        buf.push_str(&format!(
-            "{LEFT_PAD}{DIM}{}{RESET}\x1b[K\r\n\r\n",
-            fit_line(hint, cols.saturating_sub(LEFT_PAD.len()))
-        ));
+        let lines = wrap_words(hint, cols.saturating_sub(LEFT_PAD.len()));
+        extra_status_lines = lines.len().saturating_sub(1);
+        for line in lines {
+            buf.push_str(&format!("{LEFT_PAD}{DIM}{line}{RESET}\x1b[K\r\n"));
+        }
+        buf.push_str("\r\n");
     }
-    if state.filtered.is_empty() {
-        buf.push_str(&format!("{LEFT_PAD}{DIM}no matches{RESET}\x1b[K\r\n"));
-    }
+    let viewport = (term_rows as usize)
+        .saturating_sub(9 + extra_status_lines + footer_lines.len())
+        .max(1);
+    let max_offset = state.filtered.len().saturating_sub(viewport);
+    state.offset = state.offset.min(max_offset);
+    buf.push_str(&panel_title_rule(cols, "bindings"));
+    buf.push_str("\r\n");
+    let key_width = (inner_width / 3).max(8);
     let conflicts = if state.editing.is_some() {
         duplicate_partners(&state.rows)
     } else {
@@ -1590,21 +2123,40 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
         EditMode::Manual { row } => (row, RowHighlight::Listening),
         EditMode::Confirming { row } => (row, RowHighlight::Editing),
     });
-    for &idx in state.filtered.iter().skip(state.offset).take(viewport) {
-        buf.push_str(&render_row(
-            &state.rows[idx],
-            cols,
+    let mut visible_rows = state.filtered.iter().copied().skip(state.offset);
+    for position in 0..viewport {
+        let row_index = visible_rows.next();
+        let row_highlight = row_index.and_then(|idx| {
             selected_row
                 .filter(|(row, _)| *row == idx)
-                .map(|(_, highlight)| highlight),
-            conflicts
-                .get(&idx)
-                .map(|others| conflict_note(&state.rows, others))
-                .as_deref(),
-        ));
-        buf.push_str("\x1b[K\r\n");
+                .map(|(_, highlight)| highlight)
+        });
+        let left = if let Some(idx) = row_index {
+            render_row_with_key_width(
+                &state.rows[idx],
+                inner_width,
+                key_width,
+                row_highlight,
+                conflicts
+                    .get(&idx)
+                    .map(|others| conflict_note(&state.rows, others))
+                    .as_deref(),
+            )
+        } else if position == 0 && state.filtered.is_empty() {
+            format!("{LEFT_PAD}{DIM}no matches{RESET}")
+        } else {
+            String::new()
+        };
+        let background = match row_highlight {
+            Some(RowHighlight::Editing | RowHighlight::Listening) => Some(BG_GREY),
+            Some(RowHighlight::Saved) => Some(BG_SAVED),
+            Some(RowHighlight::Conflict) | None => None,
+        };
+        buf.push_str(&panel_line(&left, cols, background));
+        buf.push_str("\r\n");
     }
-    buf.push_str("\x1b[K\r\n");
+    buf.push_str(&panel_rule(cols, '╰', '╯'));
+    buf.push_str("\r\n\r\n");
     for (i, line) in footer_lines.iter().enumerate() {
         if i > 0 {
             buf.push_str("\x1b[K\r\n");
@@ -1614,6 +2166,87 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     }
     buf.push_str("\x1b[K");
     out.write_all(buf.as_bytes())?;
+    out.flush()?;
+    if state
+        .profile_toast_until
+        .is_some_and(|deadline| Instant::now() < deadline)
+    {
+        render_profile_toast(
+            out,
+            &state.profiles,
+            &state.active_profile,
+            cols,
+            term_rows as usize,
+        )?;
+    }
+    Ok(())
+}
+
+fn render_profile_toast(
+    out: &mut impl Write,
+    profiles: &[String],
+    active_profile: &str,
+    cols: usize,
+    rows: usize,
+) -> Result<()> {
+    if cols < 20 || rows < 9 {
+        return Ok(());
+    }
+
+    let width = 34.min(cols - 6);
+    let inner_width = width - 2;
+    let visible_count = profiles.len().min(rows - 8);
+    let height = visible_count + 4;
+    let left = (cols - width) / 2;
+    let top = (rows - height) / 2;
+
+    // Clear one row and two columns around the box so the underlying keybinds
+    // do not visually run into its border.
+    let blank = " ".repeat(width + 4);
+    for row in top - 1..=top + height {
+        write!(out, "\x1b[{};{}H{RESET}{blank}", row + 1, left - 1)?;
+    }
+
+    let title = format!(" {} ", fit_line("switch keybind profile", inner_width - 2));
+    let title_width = title.chars().count();
+    let remaining = inner_width.saturating_sub(title_width);
+    let top_line = format!(
+        "{BORDER}╭{}{RESET}{BOLD}{BLUE}{}{RESET}{BORDER}{}╮{RESET}",
+        "─".repeat(remaining / 2),
+        title,
+        "─".repeat(remaining - remaining / 2),
+    );
+    write!(out, "\x1b[{};{}H{top_line}", top + 1, left + 1)?;
+
+    let blank_line = format!(
+        "{BORDER}│{RESET}{}{BORDER}│{RESET}",
+        " ".repeat(inner_width)
+    );
+    write!(out, "\x1b[{};{}H{blank_line}", top + 2, left + 1)?;
+
+    for (index, name) in profiles.iter().take(visible_count).enumerate() {
+        let selected = name == active_profile;
+        let name = fit_line(name, inner_width.saturating_sub(8));
+        let label = if selected {
+            format!("  {PILL_GREEN}{BG_GREEN}{FG_BLACK}{BOLD} {name} {RESET}{PILL_GREEN}{RESET}")
+        } else {
+            format!("    {name}")
+        };
+        let line = format!(
+            "{BORDER}│{RESET}{}{BORDER}│{RESET}",
+            pad_ansi(&label, inner_width)
+        );
+        write!(out, "\x1b[{};{}H{line}", top + index + 3, left + 1)?;
+    }
+
+    write!(
+        out,
+        "\x1b[{};{}H{blank_line}",
+        top + visible_count + 3,
+        left + 1
+    )?;
+    let bottom_line = format!("{BORDER}╰{}╯{RESET}", "─".repeat(inner_width),);
+    write!(out, "\x1b[{};{}H{bottom_line}", top + height, left + 1)?;
     out.flush()?;
     Ok(())
 }
@@ -1636,9 +2269,16 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
     loop {
         render(out, &mut state)?;
 
-        // Block for the next event, then drain any already-queued ones (a
-        // fast scroll burst) before redrawing once, instead of redrawing
-        // per event.
+        // Wait until input or the profile-switch toast expires, then drain
+        // already-queued events before redrawing once.
+        let timeout = state
+            .profile_toast_until
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::from_secs(86_400));
+        if !event::poll(timeout)? {
+            state.profile_toast_until = None;
+            continue;
+        }
         let mut events = vec![event::read()?];
         while event::poll(Duration::from_millis(0))? {
             events.push(event::read()?);
@@ -1657,18 +2297,43 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                         if let Some(index) = tab_at_column(
                             &state.profiles,
                             state.viewed_profile.as_deref(),
-                            &state.active_profile,
                             cols,
                             m.column,
                         ) {
                             state.select_profile(index)?;
                         }
                     }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if m.row == SEARCH_INPUT_ROW
+                            && state.editing.is_none()
+                            && state.naming.is_none()
+                            && state.renaming.is_none()
+                            && state.deleting.is_none()
+                            && state.notice.is_none() =>
+                    {
+                        state.searching = true;
+                    }
                     _ => {}
                 },
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     state.notice = None;
-                    if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    let can_request_profile_action = state.naming.is_none()
+                        && state.renaming.is_none()
+                        && state.deleting.is_none()
+                        && !state.searching
+                        && !matches!(
+                            state.editing,
+                            Some(EditMode::Listening { .. })
+                                | Some(EditMode::Manual { .. })
+                                | Some(EditMode::Confirming { .. })
+                        );
+                    if can_request_profile_action && shifted_char(&k, 'D') {
+                        state.request_delete_profile();
+                    } else if can_request_profile_action && k.code == KeyCode::Char('r') {
+                        state.request_rename_profile();
+                    } else if k.code == KeyCode::Char('c')
+                        && k.modifiers.contains(KeyModifiers::CONTROL)
+                    {
                         match state.editing {
                             None => quit = true,
                             Some(EditMode::Selecting { .. }) => state.request_leave_edit(),
@@ -1733,6 +2398,29 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                             }
                             _ => {}
                         }
+                    } else if let Some(name) = state.renaming.as_mut() {
+                        match k.code {
+                            KeyCode::Esc => state.renaming = None,
+                            KeyCode::Enter => state.rename_profile()?,
+                            KeyCode::Backspace => {
+                                name.pop();
+                            }
+                            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                                name.clear();
+                            }
+                            KeyCode::Char(c)
+                                if c.is_ascii_alphanumeric() || c == '-' || c == '_' =>
+                            {
+                                name.push(c);
+                            }
+                            _ => {}
+                        }
+                    } else if state.deleting.is_some() {
+                        match k.code {
+                            KeyCode::Char('y') | KeyCode::Enter => state.delete_profile()?,
+                            KeyCode::Char('n') | KeyCode::Esc => state.deleting = None,
+                            _ => {}
+                        }
                     } else if state.searching {
                         match k.code {
                             KeyCode::Esc => {
@@ -1774,8 +2462,8 @@ fn main_loop(out: &mut impl Write) -> Result<()> {
                             KeyCode::Right => state.move_profile(1)?,
                             KeyCode::PageDown => state.scroll(PAGE_STEP as isize),
                             KeyCode::PageUp => state.scroll(-(PAGE_STEP as isize)),
-                            KeyCode::Char('K') => state.switch_profile()?,
-                            KeyCode::Char('N') => state.naming = Some(String::new()),
+                            _ if shifted_char(&k, 'K') => state.switch_profile()?,
+                            _ if shifted_char(&k, 'N') => state.naming = Some(String::new()),
                             _ => {}
                         }
                     }
@@ -1797,10 +2485,7 @@ mod tests {
 
     #[test]
     fn footer_keys_use_a_remote_safe_emphasis() {
-        let lines = wrap_footer(
-            &footer_segments(false, false, false, false, false, false, false),
-            76,
-        );
+        let lines = browse_footer_lines(76);
         assert!(!lines.is_empty());
         assert!(lines.iter().all(|line| line.contains(FG_WHITE)));
     }
@@ -1821,6 +2506,25 @@ mod tests {
     }
 
     #[test]
+    fn shifted_shortcut_accepts_both_terminal_key_representations() {
+        let uppercase = KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        let lowercase = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::SHIFT);
+        let unshifted = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+
+        assert!(shifted_char(&uppercase, 'D'));
+        assert!(shifted_char(&lowercase, 'D'));
+        assert!(!shifted_char(&unshifted, 'D'));
+    }
+
+    #[test]
+    fn bindings_frame_fits_the_popup_width() {
+        let cols: usize = 76;
+        assert_eq!(ansi_width(&panel_rule(cols, '╭', '╮')), cols);
+        assert_eq!(ansi_width(&panel_rule(cols, '╰', '╯')), cols);
+        assert_eq!(ansi_width(&panel_line("BINDINGS", cols, None)), cols);
+    }
+
+    #[test]
     fn edit_row_highlight_uses_the_mode_color() {
         let row = Row::Entry {
             target: Some(Target::Key("new_tab".to_string())),
@@ -1828,12 +2532,20 @@ mod tests {
             description: "open a tab".to_string(),
         };
 
-        let listening = render_row(&row, 76, Some(RowHighlight::Listening), None);
+        let listening = panel_line(
+            &render_row(&row, 76, Some(RowHighlight::Listening), None),
+            76,
+            Some(BG_GREY),
+        );
         assert!(listening.contains(BG_GREY));
         assert!(listening.contains(FG_WHITE));
 
-        let saved = render_row(&row, 76, Some(RowHighlight::Saved), None);
-        assert!(saved.contains(BG_GREEN));
+        let saved = panel_line(
+            &render_row(&row, 76, Some(RowHighlight::Saved), None),
+            76,
+            Some(BG_SAVED),
+        );
+        assert!(saved.contains(BG_SAVED));
         assert!(saved.contains(FG_BLACK));
     }
 
@@ -1899,7 +2611,9 @@ mod tests {
             staged_undo: None,
             duplicates_only: false,
             naming: None,
+            renaming: None,
             notice: None,
+            deleting: None,
         }
     }
 

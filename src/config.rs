@@ -82,16 +82,26 @@ pub fn list_profiles() -> Result<Vec<String>> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut names: Vec<String> = fs::read_dir(&dir)
-        .with_context(|| format!("reading profiles dir {dir:?}"))?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            name.strip_suffix(".toml").map(|s| s.to_string())
-        })
-        .collect();
-    names.sort();
-    Ok(names)
+    let mut profiles = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("reading profiles dir {dir:?}"))? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if let Some(name) = file_name.strip_suffix(".toml") {
+            let created = entry
+                .metadata()
+                .and_then(|metadata| metadata.created())
+                .with_context(|| format!("reading creation time of {file_name}"))?;
+            profiles.push((name.to_string(), created));
+        }
+    }
+    profiles.sort_by(|a, b| {
+        (a.0 != "default")
+            .cmp(&(b.0 != "default"))
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    Ok(profiles.into_iter().map(|(name, _)| name).collect())
 }
 
 /// Ensure the immutable neutral profile exists. It is generated from the
@@ -128,7 +138,8 @@ pub fn write_active_profile(name: &str) -> Result<()> {
 }
 
 /// Pick the switch target: an explicit pending-name if present, otherwise
-/// the profile alphabetically after the currently active one (wrapping).
+/// the profile created after the currently active one (wrapping), with
+/// `default` always first.
 pub fn pick_target(profiles: &[String]) -> Result<String> {
     if let Some(explicit) = take_pending_name()? {
         if !profiles.iter().any(|p| p == &explicit) {

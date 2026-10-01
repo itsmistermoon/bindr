@@ -3,8 +3,8 @@
 //! Target profile selection:
 //!   - A pending-name file (see config::take_pending_name) picks that
 //!     profile explicitly, if present.
-//!   - Otherwise cycles alphabetically to the profile after the currently
-//!     active one (wrapping around), like Zellij keybinding presets.
+//!   - Otherwise cycles through default, then the remaining profiles in
+//!     creation order (wrapping around), like Zellij keybinding presets.
 
 use crate::{config, keys, pane};
 use anyhow::{Result, bail};
@@ -62,7 +62,7 @@ pub fn switch_to_next() -> Result<String> {
 pub fn run() -> Result<()> {
     let profile_count = config::list_profiles()?.len() as u32;
     let target = switch_to_next()?;
-    pane::open_popup("toast", 30, profile_count + 4, false);
+    pane::open_popup("toast", 30, profile_count + 4, true);
     println!("keybind profile switched to '{target}'");
     Ok(())
 }

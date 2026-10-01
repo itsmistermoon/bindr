@@ -30,11 +30,11 @@ title = "bindr: save current keybindings as a new profile"
 contexts = ["workspace"]
 command = ["./target/release/bindr", "save"]
 
-# Self-closing popup used to simulate a toast: lists every profile, marking
-# the active one, and exits after a short delay, which closes the pane.
+# Focused, short-lived toast: lists every profile, marks the active one, and
+# accepts shift+k to cycle again before closing after two seconds.
 [[panes]]
 id = "toast"
-title = "keybind profile"
+title = "switch keybind profile"
 placement = "popup"
 command = ["./target/release/bindr", "toast"]
 

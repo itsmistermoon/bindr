@@ -1,76 +1,39 @@
 # bindr
 
-A [Herdr](https://herdr.dev) plugin for switching between named keybinding
-profiles, Zellij-preset style. Profiles are TOML snippets holding only the
-`[keys]` table; switching one in writes it into your `config.toml` without
-touching anything else (theme, UI settings, other plugins' keybinds, etc.).
+Named keybinding profiles for [Herdr](https://herdr.dev). Switch between a
+neutral `default` profile and your own shortcuts, or browse and edit any
+profile in a terminal popup. Profiles contain a `[keys]` table and optional
+plugin command overrides; switching changes only those bindings in Herdr's
+configuration.
 
-## Features
+![Searching and editing a keybind in bindr](docs/media/search-and-edit.gif)
 
-- **Switch profiles** — cycles to the next profile alphabetically, or jumps
-  to a specific one via `save-as.sh`.
-- **Toast popup** — a self-closing popup confirming the switch and listing
-  every profile, with the active one marked.
-- **Keybinds viewer/editor** — a replica of Herdr's built-in `prefix+?`
-  panel, scrollable, with one clickable tab per profile. Browse a profile
-  without activating it, preserve the scroll position while comparing tabs,
-  edit bindings with `e` (including each profile's own prefix), switch the
-  active profile in place with `shift+k` without changing the viewed tab, and
-  fuzzy-search entries with `/`. Captures require `enter` to stage a change;
-  `backspace` retries and `u` undoes the last staged edit. Use `m` in edit mode
-  to enter a binding manually, including ranges such as `prefix+1..9`.
-  Duplicate bindings are shown in ANSI red, each naming the action it collides
-  with; `d` jumps to the next duplicate and `f` shows only duplicates. They
-  block saving, not leaving edit mode. The `default` profile is read-only.
-- **New profile** — `shift+n` in the popup copies the viewed profile under a
-  new name, or `save-as.sh` snapshots the live keybindings (including plugin
-  keybinds rebound by the active profile).
+The GIF shows a search, a manual edit, and the save prompt. The edit is made in
+an isolated demo profile.
 
-## Current status
+**Keybinds popup**
 
-`bindr` is functional but still in active development. The profile editor is
-available, and new profiles can be created from the popup; rename/delete remain
-on the roadmap.
+![The bindr keybinds popup with profile tabs, filter field, and bindings](docs/media/keybinds.png)
 
-Currently available:
+**Profile switch toast**
 
-- Profile switching with an optional confirmation toast.
-- A keybind viewer with clickable profile tabs and preserved scroll position.
-- In-popup editing of scalar keybinds, including each profile's own `prefix`.
-- Safe capture confirmation: `enter` records a change in the editor,
-  `backspace` retries, `esc` cancels, and `u` undoes the last staged edit.
-- Profile-save confirmation: leaving edit mode asks whether to save or discard
-  the changes. Duplicate bindings are highlighted in red, name the conflicting
-  action (including custom/plugin commands), and block saving until resolved.
-- Duplicate navigation in edit mode: `d` jumps to the next duplicate, `f`
-  toggles a duplicates-only filter, and `pgup`/`pgdn` scroll the list.
-- Per-profile plugin keybinds: rows in the `custom` section (`[[keys.command]]`
-  blocks) are editable and saved in the profile's `[plugin_keys]` table.
-- Manual binding entry for Herdr range syntax such as `prefix+1..9`, and
-  `x` to unset a binding (saved as `""`, shown as `unset`).
-- Persistent single-level undo: the last saved change is stored in
-  `HERDR_PLUGIN_STATE_DIR/last-keybind-edit.toml`, so `u` can revert it even
-  after reopening the popup, returning to the edited profile.
-- Row state colors using terminal ANSI slots: cyan for selection, grey while
-  listening or typing manually, green after a change is recorded, red for
-  duplicates.
-- The `default` profile is generated when needed, can be selected as a neutral
-  fallback, and can never be edited or overwritten.
-- Editing the active profile updates Herdr after the profile-save confirmation;
-  editing another profile only changes its TOML file after confirmation.
+![The profile switch toast over the keybinds popup](docs/media/toast.png)
 
-Known limitations:
+## What it does
 
-- Undo currently has one level.
-- Some shortcuts can be intercepted by the terminal, SSH/tmux, Herdr, or the
-  operating system.
-- Only duplicates within the profile are detected; collisions with terminal,
-  OS, or other plugins' bindings are not.
-
-## Roadmap
-
-1. Improve profile management (multiple undo levels, rename/delete).
-2. Expand interactive testing across local, SSH, and tmux environments.
+- Cycle profiles in creation order, with `default` always first. Press
+  `shift+k` again while the two-second toast is open to keep cycling, without
+  repeating the plugin shortcut's prefix.
+- Browse profiles without activating them. The active profile and viewed tab
+  have separate indicators, and the toast can appear over the keybinds popup.
+- Search commands and shortcuts with `/`. Edit scalar and plugin keybinds with
+  `e`, capture a key with `enter`, type one manually with `m`, or unset it with
+  `x`. Leaving edit mode asks whether to save or discard changes.
+- See conflicting shortcuts in red, jump between them with `d`, or show only
+  duplicates with `f`. Conflicts must be resolved before saving.
+- Create a profile from the viewed one with `shift+n`, rename it with `r`,
+  delete it with `shift+d`, and undo the last saved change with `u`. The
+  generated `default` profile is read-only.
 
 ## Install
 
@@ -78,79 +41,123 @@ Known limitations:
 herdr plugin install itsmistermoon/bindr
 ```
 
-For local development, use `herdr plugin link <path-to-this-repo>` instead
-(this skips the `[[build]]` step, so run `cargo build --release` by hand
-first).
+Add shortcuts for the plugin actions to `~/.config/herdr/config.toml`:
 
-## Usage
+```toml
+[[keys.command]]
+key = "prefix+shift+k"
+type = "plugin_action"
+command = "itsmistermoon.bindr.switch-profile"
+description = "bindr: switch profile"
 
-Default keybinds (see `herdr-plugin.toml` for the action IDs):
+[[keys.command]]
+key = "prefix+shift+e"
+type = "plugin_action"
+command = "itsmistermoon.bindr.show-keybinds"
+description = "bindr: view keybinds"
+```
+
+Reload Herdr's configuration after adding them. For local development, use
+`herdr plugin link <path-to-this-repo>` and run `cargo build --release`; linking
+does not run the plugin's install build step.
+
+## Try the `bindr` profile
+
+The included [profile](examples/profiles/bindr.toml) is the author's daily
+setup. It gives Herdr the familiar macOS tab, split, pane, and workspace
+shortcuts while retaining `ctrl+b` as a prefix:
+
+| Shortcut | Herdr action |
+| --- | --- |
+| `cmd+t`, `cmd+w` | New tab, close pane |
+| `cmd+d`, `cmd+shift+d` | Split vertically, split horizontally |
+| `cmd+]`, `cmd+[` | Cycle panes |
+| `alt+tab`, `alt+shift+tab` | Next and previous Herdr tab |
+| `cmd+1..9` | Switch workspace |
+
+It also leaves `switch_tab`, `rename_tab`, and directional pane focus unbound.
+Copy it into the plugin's profile directory from this checkout:
+
+```sh
+profile_dir="$(herdr plugin config-dir itsmistermoon.bindr)/profiles"
+mkdir -p "$profile_dir"
+cp examples/profiles/bindr.toml "$profile_dir/bindr.toml"
+```
+
+Open the keybinds popup to inspect it, or use `prefix+shift+k` to cycle to it.
+The profile is an example: edit its bindings in the popup to suit your own
+keyboard and workflow.
+
+### Give those shortcuts to Herdr in Ghostty
+
+On macOS, Ghostty handles many `cmd` combinations before Herdr sees them.
+The companion [Ghostty configuration snippet](examples/ghostty-bindr.conf)
+uses the same `unbind` rules as the author's local setup. Add its contents to
+your Ghostty configuration and reload Ghostty. It releases Ghostty's tab,
+split, pane, and digit shortcuts so the `bindr` profile can handle them.
+
+The snippet sets `macos-option-as-alt = right`: use **Right Option+Tab** to
+switch Herdr tabs, while Left Option still types macOS characters. It unbinds
+both `cmd+1` and `cmd+digit_1` (and the corresponding pairs through 9), since
+Ghostty has bindings for both the typed and physical digit keys. It also
+unbinds `cmd+shift+[` and `cmd+shift+]` from Ghostty, although this profile
+uses Right Option+Tab for tab navigation.
+
+Ghostty's [`unbind` action](https://ghostty.org/docs/config/keybind/reference)
+removes Ghostty's binding; it cannot release shortcuts captured by macOS or
+another application. The approach follows the two guides in [See also](#see-also).
+
+## Use the popup
 
 | Key | Action |
 | --- | --- |
-| `prefix+shift+k` | Switch to the next profile |
-| `prefix+shift+e` | View and edit keybind profiles |
+| `←` / `→`, click | Browse profile tabs |
+| `/` | Filter by command or shortcut |
+| `e` | Edit the viewed profile |
+| `enter` in edit mode | Listen for a replacement shortcut |
+| `m` in edit mode | Type a shortcut, including ranges such as `prefix+1..9` |
+| `x` in edit mode | Unset the selected binding |
+| `esc` in edit mode | Review the save or discard prompt |
+| `r`, `shift+n`, `shift+d` | Rename, create, or delete a profile |
+| `u` | Undo the last saved profile change |
 
-Inside the keybinds popup, use `←/→` or click to browse profiles without
-activating them. Press `e` to edit the viewed profile; `Enter` selects a row
-and enters key listening mode. Press `m` in edit mode to type a binding
-manually; `Ctrl+U` clears the text, so a range can be entered as
-`prefix+1..9`. Press `x` to unset the selected binding (not allowed for
-`prefix`). Press `esc` from the selector to review the pending profile
-changes, then `y`/`enter` to save or `n` to discard. Duplicate bindings are
-red, show what they collide with, and must be resolved before saving; `d`
-jumps between them and `f` filters to them. `default` is always
-read-only. `u` undoes the last staged edit while editing, or the last saved
-profile change after reopening the popup.
+During capture, `enter` stages the new binding and `backspace` retries.
+`ctrl+u` clears manual text. A saved edit to the active profile reloads Herdr;
+an edit to another profile changes only that profile's file.
 
-Press `shift+n` to create a new profile as a copy of the viewed one; type a
-name (letters, digits, `-`, `_`) and press `enter`.
-
-Profiles live under `HERDR_PLUGIN_CONFIG_DIR/profiles/<name>.toml`. To save
-the currently active keybindings as a new profile from the shell:
+Profiles live at `HERDR_PLUGIN_CONFIG_DIR/profiles/<name>.toml`. To snapshot
+the currently active keybindings into a new profile from this checkout, run:
 
 ```sh
 ./save-as.sh <profile-name>
 ```
 
-## Development
-
-```sh
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo build --release
-```
-
 ## How it works
 
-Each profile file holds the `[keys]` table (and any `[keys.*]` dotted
-subtables), plus an optional `[plugin_keys]` table mapping plugin command ids
-to bindings:
+Switching a profile replaces `[keys]` in Herdr's live `config.toml` and
+rewrites only the `key` field of matching `[[keys.command]]` blocks. Other
+configuration remains untouched. An optional `[plugin_keys]` table in a
+profile can override plugin command bindings by command ID:
 
 ```toml
 [plugin_keys]
 "herdr-bar.open" = "cmd+k"
 ```
 
-Switching a profile surgically replaces `[keys]` in the live `config.toml`
-and rewrites only the `key` field of matching `[[keys.command]]` blocks;
-blocks are never created or removed, since plugins own them. The plugin's own
-binding is remembered in `HERDR_PLUGIN_STATE_DIR/displaced-plugin-keys.toml`
-while an override is live, and restored when switching to a profile without
-one. Every other section is left untouched.
+The last saved change can be undone even after reopening the popup. Undo has
+one level. Duplicate detection covers bindings inside the viewed profile;
+the terminal, macOS, and other plugins may still intercept shortcuts.
 
-Built with [`toml_edit`](https://docs.rs/toml_edit) for format-preserving
-edits and [`crossterm`](https://docs.rs/crossterm) for the interactive
-popups.
+Built with [`toml_edit`](https://docs.rs/toml_edit) and
+[`crossterm`](https://docs.rs/crossterm).
+
+## Development
+
+```sh
+cargo build --release
+```
 
 ## See also
 
-If you use [Ghostty](https://ghostty.org) as your terminal, you can unbind
-its own tab/pane/split shortcuts so they pass through to Herdr instead,
-avoiding duplicate or conflicting keys:
-
 - [Making Ghostty and Herdr share one keyboard](https://dev.to/oronbz/making-ghostty-and-herdr-share-one-keyboard-4p0g)
 - [Ghostty + Herdr keybindings](https://deepakness.com/raw/ghostty-herdr-keybindings/)
-
-For fuzzy-searching keybinds from outside Herdr's own panels, see
-[herdr-keybind-search](https://github.com/malone-c/herdr-keybind-search).

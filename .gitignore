@@ -1,3 +1,4 @@
 /target
+.firecrawl/
 .hot/
 /package-lock.json

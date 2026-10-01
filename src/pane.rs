@@ -18,7 +18,9 @@ pub fn open_popup(entrypoint: &str, width: u32, height: u32, focus: bool) {
         "--height",
         &height.to_string(),
     ]);
-    if !focus {
+    if focus {
+        cmd.arg("--focus");
+    } else {
         cmd.arg("--no-focus");
     }
     let _ = cmd.output();
