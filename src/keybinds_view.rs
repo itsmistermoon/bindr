@@ -2068,27 +2068,27 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
         let key = |binding: &str| format!("{RESET}{FG_WHITE}{binding}{RESET}{DIM}");
         let hint = if confirming && state.has_unresolved_duplicates() {
             format!(
-                "resolve red duplicates to save; {} discard; {} back",
+                "resolve red duplicates to save · discard {} · back {}",
                 key("n"),
                 key("esc")
             )
         } else if confirming {
             format!(
-                "save changes? {} yes; {} discard; {} back",
+                "save changes? yes {} · discard {} · back {}",
                 key("y/enter"),
                 key("n"),
                 key("esc")
             )
         } else if let Some(others) = selected_conflict(state) {
             format!(
-                "also used by {}; {} next duplicate; {} duplicates only",
+                "also used by {} · next duplicate {} · duplicates only {}",
                 conflict_note(&state.rows, &others),
                 key("d"),
                 key("f")
             )
         } else if state.has_unresolved_duplicates() {
             format!(
-                "duplicates are red; resolve them to save, or {} to discard",
+                "duplicates are red; resolve them to save, or discard with {}",
                 key("esc")
             )
         } else {
