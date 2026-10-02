@@ -273,23 +273,21 @@ struct FooterHint {
 }
 
 fn naming_footer_lines(cols: usize) -> Vec<String> {
-    wrap_footer(
-        &[
-            FooterHint {
-                label: "name",
-                key: "a-z/0-9/-/_",
-            },
-            FooterHint {
-                label: "create",
-                key: "enter",
-            },
-            FooterHint {
-                label: "cancel",
-                key: "esc",
-            },
-        ],
-        cols,
-    )
+    let input = [FooterHint {
+        label: "name",
+        key: "a-z/0-9/-/_",
+    }];
+    let actions = [
+        FooterHint {
+            label: "create",
+            key: "enter",
+        },
+        FooterHint {
+            label: "cancel",
+            key: "esc",
+        },
+    ];
+    grouped_footer_lines(&[("INPUT", &input), ("ACTIONS", &actions)], cols)
 }
 
 const FOOTER_SEP: &str = " \u{b7} ";
@@ -524,6 +522,16 @@ fn edit_footer_lines(mode: EditMode, cols: usize, prefix_listening: bool) -> Vec
             key: "esc",
         },
     ];
+    let multiple = [
+        FooterHint {
+            label: "separate with",
+            key: "comma + space",
+        },
+        FooterHint {
+            label: "e.g.",
+            key: "ctrl+space, ctrl+s",
+        },
+    ];
 
     match mode {
         EditMode::Selecting { .. } => grouped_footer_lines(
@@ -535,9 +543,14 @@ fn edit_footer_lines(mode: EditMode, cols: usize, prefix_listening: bool) -> Vec
             cols,
         ),
         EditMode::Listening { .. } => grouped_footer_lines(&[("CAPTURE", &capture)], cols),
-        EditMode::Manual { .. } => {
-            grouped_footer_lines(&[("INPUT", &input), ("ACTIONS", &manual_actions)], cols)
-        }
+        EditMode::Manual { .. } => grouped_footer_lines(
+            &[
+                ("INPUT", &input),
+                ("MULTIPLE", &multiple),
+                ("ACTIONS", &manual_actions),
+            ],
+            cols,
+        ),
         EditMode::Confirming { .. } => grouped_footer_lines(&[("SAVE", &save)], cols),
     }
 }
@@ -2007,7 +2020,7 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
     } else {
         buf.push_str("\r\n");
     }
-    let mut extra_status_lines = 0;
+    let extra_status_lines;
     if show_search_field {
         buf.push_str(&search_field(cols, &state.query, state.searching));
         extra_status_lines = 1;
@@ -2036,9 +2049,9 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
         extra_status_lines = 1;
     } else if let Some(name) = &state.naming {
         let base = state.viewed_profile.as_deref().unwrap_or(DEFAULT_PROFILE);
-        buf.push_str(&format!(
-            "{LEFT_PAD}{BOLD}new profile from {base}:{RESET} {name}\u{2588}\x1b[K\r\n\r\n",
-        ));
+        let title = fit_line(&format!("new profile from {base}"), cols.saturating_sub(6));
+        buf.push_str(&text_field(cols, &title, name, None, true));
+        extra_status_lines = 1;
     } else if let Some(name) = &state.renaming {
         buf.push_str(&text_field(cols, "rename profile", name, None, true));
         extra_status_lines = 1;
@@ -2081,7 +2094,7 @@ fn render(out: &mut impl Write, state: &mut ViewState) -> Result<()> {
         } else {
             match editing {
                 EditMode::Selecting { .. } => format!(
-                    "{} listen · {} manual text · {} leave edit mode",
+                    "listen {} · manual text {} · leave edit mode {}",
                     key("enter"),
                     key("m"),
                     key("esc")
@@ -2500,6 +2513,35 @@ mod tests {
         let lines = browse_footer_lines(76);
         assert!(!lines.is_empty());
         assert!(lines.iter().all(|line| line.contains(FG_WHITE)));
+    }
+
+    #[test]
+    fn new_profile_footer_uses_input_and_actions_groups() {
+        let lines = naming_footer_lines(76);
+        assert!(lines[0].contains("INPUT"));
+        assert!(lines.iter().any(|line| line.contains("ACTIONS")));
+    }
+
+    #[test]
+    fn multiple_shortcut_hint_appears_only_between_manual_input_and_actions() {
+        let lines = edit_footer_lines(EditMode::Manual { row: 0 }, 76, false);
+        assert!(lines[0].contains("INPUT"));
+        assert!(lines[1].contains("MULTIPLE"));
+        assert!(lines[1].contains("comma + space"));
+        assert!(lines[1].contains("ctrl+space, ctrl+s"));
+        assert!(lines[2].contains("ACTIONS"));
+
+        for mode in [
+            EditMode::Selecting { row: 0 },
+            EditMode::Listening {
+                row: 0,
+                prefix_seen: false,
+            },
+            EditMode::Confirming { row: 0 },
+        ] {
+            let lines = edit_footer_lines(mode, 76, false);
+            assert!(!lines.iter().any(|line| line.contains("MULTIPLE")));
+        }
     }
 
     #[test]
