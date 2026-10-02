@@ -40,18 +40,18 @@ fn run_toast(out: &mut impl Write) -> Result<()> {
             break;
         }
 
-        if event::poll(expires_at.saturating_duration_since(now))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && is_shift_k(&key) {
-                    switch::switch_to_next()?;
-                    active = config::read_active_profile();
-                    profiles = config::list_profiles()?;
-                    expires_at = Instant::now() + Duration::from_secs(2);
-                } else {
-                    // The short-lived popup should not keep consuming input
-                    // after the user presses a different key.
-                    break;
-                }
+        if event::poll(expires_at.saturating_duration_since(now))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind == KeyEventKind::Press && is_shift_k(&key) {
+                switch::switch_to_next()?;
+                active = config::read_active_profile();
+                profiles = config::list_profiles()?;
+                expires_at = Instant::now() + Duration::from_secs(2);
+            } else {
+                // The short-lived popup should not keep consuming input
+                // after the user presses a different key.
+                break;
             }
         }
     }
