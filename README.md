@@ -1,7 +1,7 @@
 # bindr
 
 Named keybinding profiles for [Herdr](https://herdr.dev). Switch between a
-neutral `default` profile and your own shortcuts, or browse and edit any
+personal `default` profile and your own shortcuts, or browse and edit any
 profile in a terminal popup. Profiles contain a `[keys]` table and optional
 plugin command overrides; switching changes only those bindings in Herdr's
 configuration.

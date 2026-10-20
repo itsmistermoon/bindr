@@ -12,9 +12,8 @@ platforms = ["macos", "linux"]
 [[build]]
 command = ["cargo", "build", "--release"]
 
-# Profiles live under HERDR_PLUGIN_CONFIG_DIR/profiles/<name>.toml, each holding
-# only the [keys] table (and any [keys.*] dotted subtables). Other plugins'
-# [[keys.command]] blocks are never touched.
+# Profile format and plugin command overrides are documented in README.md,
+# under "How it works".
 [[actions]]
 id = "switch-profile"
 title = "bindr: switch profile"
