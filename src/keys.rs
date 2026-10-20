@@ -127,7 +127,7 @@ pub fn extract_keys_only(doc: &DocumentMut) -> DocumentMut {
     out
 }
 
-/// Build the neutral, read-only profile from the keybinds viewer's defaults.
+/// Build the neutral seed profile from the keybinds viewer's defaults.
 pub fn default_profile() -> DocumentMut {
     let mut profile = DocumentMut::new();
     for section in keybinds_data::SECTIONS {

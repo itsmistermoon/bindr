@@ -32,8 +32,11 @@ configuration.
   duplicates with `f`. Conflicts must be resolved before saving.
 - Create a profile from the viewed one with `shift+n`, rename it with `r`,
   delete it with `shift+d`, and undo the last saved change with `u`. The
-  generated `default` profile is read-only and refreshes when bindr's built-in
-  binding list is updated.
+  `default` profile cannot be edited, renamed, or deleted in the popup.
+  It is created only when missing, using built-in bindings without plugin
+  overrides. You can customize `profiles/default.toml` directly, including
+  adding a personal `[plugin_keys]` table; bindr preserves the existing file
+  when switching profiles and after updates.
 
 ## Install
 

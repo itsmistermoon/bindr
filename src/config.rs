@@ -104,15 +104,13 @@ pub fn list_profiles() -> Result<Vec<String>> {
     Ok(profiles.into_iter().map(|(name, _)| name).collect())
 }
 
-/// Keep the read-only neutral profile aligned with the built-in defaults.
+/// Seed the neutral profile once, preserving any personal customizations.
 pub fn ensure_default_profile() -> Result<()> {
     let dir = profiles_dir();
     fs::create_dir_all(&dir)?;
     let path = dir.join("default.toml");
-    let profile = keys::default_profile();
-    let contents = profile.to_string();
-    if fs::read_to_string(&path).ok().as_deref() != Some(contents.as_str()) {
-        keys::save(&path, &profile)?;
+    if !path.exists() {
+        keys::save(&path, &keys::default_profile())?;
     }
     Ok(())
 }
