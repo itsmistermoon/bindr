@@ -104,13 +104,17 @@ pub fn list_profiles() -> Result<Vec<String>> {
     Ok(profiles.into_iter().map(|(name, _)| name).collect())
 }
 
-/// Seed the neutral profile once, preserving any personal customizations.
+/// Seed the personal profile once, preserving any personal customizations.
 pub fn ensure_default_profile() -> Result<()> {
     let dir = profiles_dir();
     fs::create_dir_all(&dir)?;
     let path = dir.join("default.toml");
     if !path.exists() {
-        keys::save(&path, &keys::default_profile())?;
+        let mut profile = keys::default_profile();
+        keys::Target::Command("herdr-bar.open".to_string()).set(&mut profile, "cmd+k")?;
+        keys::Target::Command("termscope.open-links".to_string())
+            .set(&mut profile, "cmd+shift+t")?;
+        keys::save(&path, &profile)?;
     }
     Ok(())
 }

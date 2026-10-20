@@ -29,17 +29,29 @@ impl Drop for ConfigDir {
 }
 
 #[test]
-fn seeds_missing_default_with_only_builtin_keys() {
+fn seeds_missing_default_with_personal_plugin_keys() {
     let dir = ConfigDir::new("seed-default");
     dir.seed();
     let contents = fs::read_to_string(dir.0.join("profiles/default.toml")).unwrap();
     let profile = contents.parse::<toml_edit::DocumentMut>().unwrap();
-    assert_eq!(profile.len(), 1);
+    assert_eq!(profile.len(), 2);
     assert!(profile["keys"].is_table());
     assert_eq!(
         profile["keys"]["rename_tab"].as_str(),
         Some("prefix+shift+t")
     );
+    assert_eq!(
+        profile["plugin_keys"]["herdr-bar.open"].as_str(),
+        Some("cmd+k")
+    );
+    assert_eq!(
+        profile["plugin_keys"]["termscope.open-links"].as_str(),
+        Some("cmd+shift+t")
+    );
+    for (_, binding) in profile["keys"].as_table().unwrap().iter() {
+        assert_ne!(binding.as_str(), Some("cmd+k"));
+        assert_ne!(binding.as_str(), Some("cmd+shift+t"));
+    }
 }
 
 #[test]

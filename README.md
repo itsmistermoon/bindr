@@ -33,9 +33,11 @@ configuration.
 - Create a profile from the viewed one with `shift+n`, rename it with `r`,
   delete it with `shift+d`, and undo the last saved change with `u`. The
   `default` profile cannot be edited, renamed, or deleted in the popup.
-  It is created only when missing, using built-in bindings without plugin
-  overrides. You can customize `profiles/default.toml` directly, including
-  adding a personal `[plugin_keys]` table; bindr preserves the existing file
+  It is created only when missing, using built-in bindings plus personal
+  `[plugin_keys]` overrides for `herdr-bar.open` (`cmd+k`) and
+  `termscope.open-links` (`cmd+shift+t`). The published built-in defaults
+  contain no plugin overrides. You can customize `profiles/default.toml`
+  directly; bindr preserves the existing file
   when switching profiles and after updates.
 
 ## Install
