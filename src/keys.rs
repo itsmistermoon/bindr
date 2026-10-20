@@ -1,11 +1,7 @@
-//! Surgical edits to the `[keys]` table in Herdr's `config.toml`, leaving
-//! everything else -- theme, ui, and every `[[keys.command]]` block from any
-//! plugin -- byte-for-byte untouched where possible.
-//!
-//! `[keys]`, `[keys.indexed]`, and `[[keys.command]]` are all, syntactically,
-//! the same top-level "keys" table in TOML's tree; toml_edit lets us touch
-//! only built-in bindings (and the `indexed` subtable) while leaving
-//! the `command` array-of-tables node completely alone.
+//! Surgical edits to Herdr's `config.toml`, preserving unrelated formatting
+//! where possible. Built-in bindings and `[[keys.command]]` blocks share
+//! the same top-level `[keys]` table; profile application handles them
+//! separately (see `apply_profile` and `apply_plugin_keys`).
 
 use crate::keybinds_data;
 use anyhow::{Context, Result, bail};
@@ -127,7 +123,7 @@ pub fn extract_keys_only(doc: &DocumentMut) -> DocumentMut {
     out
 }
 
-/// Build the neutral, read-only profile from the keybinds viewer's defaults.
+/// Build the neutral seed profile from the keybinds viewer's defaults.
 pub fn default_profile() -> DocumentMut {
     let mut profile = DocumentMut::new();
     for section in keybinds_data::SECTIONS {

@@ -1,7 +1,7 @@
 # bindr
 
 Named keybinding profiles for [Herdr](https://herdr.dev). Switch between a
-neutral `default` profile and your own shortcuts, or browse and edit any
+personal `default` profile and your own shortcuts, or browse and edit any
 profile in a terminal popup. Profiles contain a `[keys]` table and optional
 plugin command overrides; switching changes only those bindings in Herdr's
 configuration.
@@ -32,8 +32,13 @@ configuration.
   duplicates with `f`. Conflicts must be resolved before saving.
 - Create a profile from the viewed one with `shift+n`, rename it with `r`,
   delete it with `shift+d`, and undo the last saved change with `u`. The
-  generated `default` profile is read-only and refreshes when bindr's built-in
-  binding list is updated.
+  `default` profile cannot be edited, renamed, or deleted in the popup.
+  It is created only when missing, using built-in bindings plus personal
+  `[plugin_keys]` overrides for `herdr-bar.open` (`cmd+k`) and
+  `termscope.open-links` (`cmd+shift+t`). The published built-in defaults
+  contain no plugin overrides. You can customize `profiles/default.toml`
+  directly; bindr preserves the existing file
+  when switching profiles and after updates.
 
 ## Install
 
