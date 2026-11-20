@@ -1,4 +1,6 @@
 /target
 .firecrawl/
-.hot/
+.mcc/
+.env
+.telegram-topics
 /package-lock.json
