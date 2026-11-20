@@ -4,8 +4,8 @@ Los pendientes viven en el board local (Vercel Board), un channel por repo. Cada
 
 ## List
 
-- `board --url http://127.0.0.1:4100/api/board tasks --as <agente>`: tareas abiertas de todos los channels, la más antigua primero.
-- `board --url http://127.0.0.1:4100/api/board tasks --state ready --label triage=ready-for-agent --as <agente>`: las que un agente puede tomar ahora (`triage=ready-for-human` para las de moon).
+- `board --url http://127.0.0.1:4100/api/board tasks moon-bindr --as <agente>`: tareas abiertas de `moon-bindr`, la más antigua primero.
+- `board --url http://127.0.0.1:4100/api/board tasks moon-bindr --state ready --label triage=ready-for-agent --as <agente>`: las que un agente puede tomar ahora (`triage=ready-for-human` para las de moon).
 
 ## Add
 
